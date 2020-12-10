@@ -1,13 +1,13 @@
-import enum
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import dataloader, dataset
-from chain_model import RainforestModel
-from chain_dataset import get_rainforest_dataloader, RainforestDataset
+from model import RainforestModel
+from dataset import get_rainforest_dataloader, RainforestDataset, RainforestDatasetLoad
 import gc
+from loss import lwlrap
 
 
 def load_ckpt(filename, model):
@@ -51,42 +51,46 @@ def save_ckpt_info(filename, model_path, current_epoch, learning_rate, loss, bes
 
 
 def train_one_epoch(dataloader, model, device, optimizer, current_epoch):
-
+    model.train()
+    model.to(device)
     total_loss = 0.
     num = 0.
+    total_precision = 0.
 
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss()
+    criterion = nn.BCEWithLogitsLoss()
 
-    num_repeat = 1
+    num_repeat = 5
     for kk in range(num_repeat):
         for batch_idx, batch in enumerate(dataloader):
-            uttid_list, feats, feat_len_list, target = batch
-            # print(uttid_list, feat_len_list)
+            optimizer.zero_grad()
 
-            # feats is [N, T, C]
+            uttid_list, feats, target, feat_len_list = batch
+            
             feats = feats.to(device)
             
-            # target is [N, C]
             target = target.to(device)
 
-            # activation is [N, T, C]
             activation = model(feats)
-
+            
+            # type match
+            target = target.type_as(activation)
+            
             loss = criterion(activation, target)
-
-            optimizer.zero_grad()
+            precision = lwlrap(target, activation)
 
             loss.backward()
 
             optimizer.step()
 
             total_loss += loss
+            total_precision += precision
 
             num += 1
 
             if batch_idx % 100 == 0:
-                print("batch {}/{} ({:.2f}%) ({}/{}), loss {:.5f}, average {:.5f}".format(batch_idx, len(dataloader),
-                            float(batch_idx) / len(dataloader) * 100, kk, num_repeat, loss.item(), total_loss / num))
+                print("batch {}/{} ({:.2f}%) ({}/{}), loss {:.5f}, average {:.5f}, lwlrap {:.5f}".format(batch_idx, len(dataloader),
+                            float(batch_idx) / len(dataloader) * 100, kk, num_repeat, loss.item(), total_loss / num, total_precision / num))
             
             del batch_idx, batch, feats, target
             gc.collect()
@@ -95,10 +99,52 @@ def train_one_epoch(dataloader, model, device, optimizer, current_epoch):
     return total_loss / num
 
 
+def get_cv_loss(cv_dataloader, model, current_epoch):
+    # cross validation loss
+    device = "cpu"
+    cv_total_loss = 0.
+    cv_num = 0.
+    cv_precision = 0.
+
+    # criterion = nn.CrossEntropyLoss()
+    criterion = nn.BCEWithLogitsLoss()
+
+    model.to(device)
+    model.eval()
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(cv_dataloader):
+            uttid_list, feats, target, feat_len_list = batch
+            
+            # feats is [N, T, C]
+            feats = feats.to(device)
+            
+            # target is [N, C]
+            target = target.to(device)
+                        
+            # activation is [N, C]
+            activation = model(feats)
+            target = target.type_as(activation)
+
+            loss = criterion(activation, target)
+            precision = lwlrap(target, activation)
+
+            cv_total_loss += loss
+            cv_precision += precision
+
+            cv_num += 1
+
+            del batch_idx, batch, feats, target
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, cv_precision / cv_num))
+
+
 def main():
     
     device = torch.device("cuda", 0)
-    model = RainforestModel(feat_dim=1025, output_dim=24)
+    model = RainforestModel(feat_dim=120, hidden_dim=256, output_dim=24, num_lstm_layers=3)
     model.to(device)
 
     start_epoch = 0
@@ -106,14 +152,13 @@ def main():
     learning_rate = 0.0001
     best_loss = None
 
-    manifest = "train_tp.csv"
-    audio_dir = "/home/haka/meng/Rainforest/rfcx-species-audio-detection/train"
-    dataset = RainforestDataset(manifest, audio_dir, num_classess=24, sample_frequency=48000.0, cmvn=False)
-    dataloader = get_rainforest_dataloader(dataset, model_left_context=27, model_right_context=27, frames_per_chunk=150, batch_size=1)
+    feat_path = "feats/train_tp.feats"
+    dataset = RainforestDatasetLoad(feat_path)
+    dataloader = get_rainforest_dataloader(dataset, batch_size=1, shuffle=True)
 
-    manifest_cv = "cv_tp.csv"
-    dataset_cv = RainforestDataset(manifest_cv, audio_dir, num_classess=24, sample_frequency=48000.0, cmvn=False)
-    dataloader_cv = get_rainforest_dataloader(dataset, model_left_context=27, model_right_context=27, frames_per_chunk=150, batch_size=1, shuffle=False)
+    cv_feat_path = "feats/cv_tp.feats"
+    cv_dataset = RainforestDatasetLoad(cv_feat_path)
+    cv_dataloader = get_rainforest_dataloader(cv_dataset, batch_size=1, shuffle=False)
 
     lr = learning_rate
     optimize = optim.Adam(model.parameters(), lr=lr, weight_decay=0.00001)
@@ -122,7 +167,7 @@ def main():
 
     best_epoch = 0
     best_model_path = os.path.join("exp", "best_model.pt")
-    best_model_info = os.path.join("exp", "best-epoch-info.pt")
+    best_model_info = os.path.join("exp", "best-epoch-info")
 
     for epoch in range(start_epoch, num_epoch):
         learning_rate = lr * pow(0.8, epoch)
@@ -131,6 +176,7 @@ def main():
             param_group["lr"] = learning_rate
         
         loss = train_one_epoch(dataloader=dataloader, model=model, device=device, optimizer=optimize, current_epoch=epoch)
+        get_cv_loss(cv_dataloader, model, epoch)
 
         # save best model
         if best_loss is None or best_loss > loss:
