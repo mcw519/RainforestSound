@@ -132,3 +132,4 @@ dmypy.json
 feats
 exp
 rfcx-species-audio-detection
+__pycache__
