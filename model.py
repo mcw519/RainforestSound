@@ -1,64 +1,58 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn.modules.container import ModuleList
 
-
-class RainforestModel(nn.Module):
-    def __init__(self, feat_dim, hidden_dim, output_dim, num_lstm_layers):
+class ResnetRFCX(nn.Module):
+    def __init__(self, hidden_dim, output_dim):
         super().__init__()
-
-        self.LSTM_stack = nn.LSTM(feat_dim, hidden_dim, num_layers=num_lstm_layers, batch_first=True)
-        for name, param in self.LSTM_stack.named_parameters():
-            if 'bias' in name:
-                nn.init.constant_(param, 0.0)
-            elif 'weight' in name:
-                nn.init.xavier_normal_(param)
         
-        self.projection = nn.ModuleList([
-                                        nn.Linear(hidden_dim, 128),
-                                        nn.Linear(128, output_dim)
-                                        ])
-        
+        self.resnet = torch.hub.load('pytorch/vision:v0.6.0', 'resnet50', pretrained=True)
+        self.resnet.fc = nn.Sequential(
+            nn.Linear(2048, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(hidden_dim, output_dim)
+            )
+        # only fine-tuned fc layer
+        # for para in list(self.resnet.parameters())[:-2]:
+        #     para.requires_grad=False
+    
     def forward(self, x):
-        # x is [N, chunk_size, C]
-        x, _ = self.LSTM_stack(x.float()) #(batch, frames, C)
-        
-        for i in range(len(self.projection)):
-            x = self.projection[i](x)
-        
-        # only used last output
-        x = x[:, -1, :]
-        
+        x = self.resnet(x)
+
         return x
 
 
-def test_model():
-    from SID_dataset import RainforestDatasetLoad, get_rainforest_dataloader
-    from loss import lwlrap
+def test_ResnetRFCX():
+    import os
+    import pandas as pd
+    from dataset import RFCXDataset, get_rfcx_dataloader
+    from metrics import LWLRAP
 
-    feat_dim = 1025
-    output_dim = 24
-    hidden_dim=256
-    num_lstm_layers=5
-    model = RainforestModel(feat_dim=feat_dim, hidden_dim=hidden_dim, output_dim=output_dim, num_lstm_layers=num_lstm_layers)
+    model = ResnetRFCX(1024, 24)
+    print(model.parameters)
+    rfcx_dir = "/home/haka/meng/RFCX/rfcx"
+    train_tp_pd = pd.read_csv(os.path.join(rfcx_dir, "train_tp.csv"))
     
-    feat_path = "feats/train_tp.feats"
-    dataset = RainforestDatasetLoad(feat_path)
-    dataloader = get_rainforest_dataloader(dataset, batch_size=1)
+    dataset = RFCXDataset(manifest_pd=train_tp_pd, feat_type="fbank", data_dir=rfcx_dir)
+    dataloader = get_rfcx_dataloader(dataset=dataset, batch_size=2, shuffle=False, num_workers=0)
+
+    criterion = nn.BCEWithLogitsLoss()
+
     i = 0
     for batch in dataloader:
-        uttid_list, feats, target, feat_len_list = batch
+        uttid_list, feats, targets = batch
         i += 1
-        output = model(feats)
+        y = model(feats)
+        loss = criterion(y, targets)
+        print("LWLRAP:", LWLRAP(targets, y))
+        print("Loss:", loss)
 
-        criterion = nn.BCEWithLogitsLoss()
-        loss = criterion(output, target)
-        precision = lwlrap(target, output)
-        print(loss, precision)
-
-        if i > 10:
+        if i > 5:
             break
 
+
 if __name__ == "__main__":
-    test_model()
+    test_ResnetRFCX()

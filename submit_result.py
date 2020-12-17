@@ -1,21 +1,24 @@
-from dataset import RainforestDataset
+from dataset import RFCXDataset
 import torchaudio
 import torch
 from torch.utils.data import DataLoader
 import os
-from model import RainforestModel
+from model import ResnetRFCX
 from train import load_ckpt
+import math
+from skimage.transform import resize
 
 
-class RainforsetDatasetEval(RainforestDataset):
-    def __init__(self, eval_folder, feat_type="spectrogram", cmvn=False, mask=False, chunk=150, **args):
+
+class RFCXDatasetEval(RFCXDataset):
+    def __init__(self, eval_folder, feat_type="spectrogram", chunk_size=1000):
         self.eval_folder = eval_folder
         self.file_list = self.read_folder()
         self.feat_type = feat_type # spectrogram / mfcc / fbank
-        self.feat_config = self.KaldiFeatConfig(**args)
-        self.cmvn = cmvn
-        self.mask = mask
-        self.chunk = chunk
+        self.feat_config = self.KaldiFeatConfig()
+        self.chunk_size = chunk_size
+        self.except_length = chunk_size * self.feat_config["frame_shift"] / 1000 # frame_shift is ms
+        self.use_resnet = True
     
     def __len__(self):
         return len(self.file_list)
@@ -31,25 +34,44 @@ class RainforsetDatasetEval(RainforestDataset):
         
         wav, sr = torchaudio.load(wav_path)
         
-        if self.feat_type == "mfcc":
-            feats = self.KaldiMfcc(wav)
-            feats = self.AddDeltaFeat(feats)
-        elif self.feat_type == "fbank":
-            feats = self.KaldiFbank(wav)
-            feats = self.AddDeltaFeat(feats)
-        else:
-            feats = self.KaldiSpectrogram(wav)
-        
-        if self.cmvn:
-            feats =self.Cmvn(feats)
-        
-        L, C = feats.shape
-        # print(feats.shape)
-        num_chunk = L // self.chunk
-        feats = feats[:self.chunk * num_chunk, :]
-        feats = feats.reshape(-1, self.chunk, C)
+        num_segment = math.ceil(wav.shape[1] / sr / (self.chunk_size*0.01))
 
-        assert feats.shape[0] == num_chunk
+        begin = 0
+        feat_list = []
+        for i in range(num_segment):
+            wav_end = begin + int(sr*self.chunk_size*0.01) + 1
+            if wav_end < wav.shape[1]:
+                cut_wav = wav[0][begin: wav_end].view(1, -1)
+                begin += int(sr*self.chunk_size*0.01)
+
+                if self.feat_type == "mfcc":
+                    feats = self.KaldiMfcc(cut_wav)
+            
+                elif self.feat_type == "fbank":
+                    feats = self.KaldiFbank(cut_wav)
+            
+                else:
+                    feats = self.KaldiSpectrogram(cut_wav)
+
+                """Doing  add-delta first, then resize and normailze to 0-1 for resnet"""
+                if self.use_resnet:
+                    feats = self.AddDeltaFeatStack(feats)
+                    feats = feats.permute(0, 2, 1)
+                    resnet_feat_list = []
+                    for i in range(3):
+                        temp = torch.from_numpy(resize(feats[i], (224, 400)))
+                        temp = temp - torch.min(temp)
+                        temp = temp / torch.max(temp)
+                        resnet_feat_list.append(temp)
+                        del temp
+
+                    feats = torch.stack(resnet_feat_list)
+                    del resnet_feat_list
+
+                feat_list.append(feats)        
+        feats = torch.stack(feat_list)
+        # should be [N, 3, 224, 400]
+        # print(feats.shape)
 
         return recording_id, feats
 
@@ -61,7 +83,7 @@ class RainforsetDatasetEval(RainforestDataset):
         return recording
 
 
-class RainforestEvalCollateFunc:
+class RFCXEvalCollateFunc:
     def __init__(self):
         pass
         
@@ -71,22 +93,23 @@ class RainforestEvalCollateFunc:
         output_len_list = []
         for b in batch:
             uttid, feat = b
-            T, _, _ = feat.shape
+            
+            N, _, _, _ = feat.shape
             
             uttid_list.append(uttid)
             
             feat_list.append(feat)
             
-            output_len_list.append(T)
+            output_len_list.append(N)
         
         padded_feat = torch.cat(feat_list)
         
         return uttid_list, padded_feat, output_len_list
 
 
-def get_rainforest_eval_dataloader(dataset: torch.utils.data.Dataset, batch_size=1, shuffle=False, num_workers=0):
+def get_rfcx_eval_dataloader(dataset: torch.utils.data.Dataset, batch_size=1, shuffle=False, num_workers=0):
 
-    collate_fn = RainforestEvalCollateFunc()
+    collate_fn = RFCXEvalCollateFunc()
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=collate_fn)
 
@@ -95,15 +118,16 @@ def get_rainforest_eval_dataloader(dataset: torch.utils.data.Dataset, batch_size
 
 def SubmitRFCS(eval_folder, model_path):
     device = "cpu"
-    model = RainforestModel(feat_dim=120, hidden_dim=256, output_dim=24, num_lstm_layers=3)
+    batch_size = 4
+    model = ResnetRFCX(hidden_dim=1024, output_dim=24)
 
     load_ckpt(model_path, model)
     model.to(device)
     model.eval()
+    dataset = RFCXDatasetEval(eval_folder, feat_type="fbank", chunk_size=1000)
+    dataloader = get_rfcx_eval_dataloader(dataset, batch_size=batch_size, shuffle=False)
 
-    dataset = RainforsetDatasetEval(eval_folder, sample_frequency=48000.0, cmvn=True, feat_type="fbank",  num_mel_bins=40, chunk=100)
-    dataloader = get_rainforest_eval_dataloader(dataset, batch_size=1, shuffle=False)
-
+    total_file = len(dataset)
     submit_dct = {}
 
     for batch_idx, batch in enumerate(dataloader):
@@ -122,11 +146,16 @@ def SubmitRFCS(eval_folder, model_path):
             feat_len = feat_len_list[i]
             
             result = output[first:first + feat_len, :] #.split(1, 0)
-            pred_id = result.sum(0)
-            pred_id = torch.nn.functional.softmax(pred_id, dim=-1)
+            
+            if result.shape[0] == 1:
+                pred_id = result
+            else:
+                pred_id = torch.max(result, dim=0)[0]
 
             first += feat_len
             submit_dct[uttid] = [ str(i) for i in pred_id.tolist() ]
+        
+        print("processing {}/{} files".format(len(submit_dct.keys()), total_file))
                 
     with open("RFCX_submit.csv", "w") as f:
         f.writelines("recording_id,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15,s16,s17,s18,s19,s20,s21,s22,s23" + "\n")
@@ -135,9 +164,9 @@ def SubmitRFCS(eval_folder, model_path):
 
 
 def test_eval_dataloader():
-    eval_folder = "/home/haka/meng/Rainforest/rfcx-species-audio-detection/test"
-    eval_dataset = RainforsetDatasetEval(eval_folder, sample_frequency=48000.0, cmvn=True, feat_type="fbank",  num_mel_bins=40, chunk=100)
-    eval_dataloader = get_rainforest_eval_dataloader(eval_dataset, batch_size=1, shuffle=False, num_workers=0)
+    eval_folder = "/home/haka/meng/Rainforest/rfcx-species-audio-detection/test_split/test/"
+    eval_dataset = RFCXDatasetEval(eval_folder, chunk_size=1000)
+    eval_dataloader = get_rfcx_eval_dataloader(eval_dataset, batch_size=1, shuffle=False, num_workers=0)
 
     i = 0
     for batch in eval_dataloader:
