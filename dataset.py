@@ -1,8 +1,10 @@
+# Copyright 2021 (author: Meng Wu)
+
 import os
 import pandas as pd
 import numpy as np
 import torch
-from torch.utils import data
+import math
 import torchaudio
 import sox
 import random
@@ -13,7 +15,7 @@ from torch.utils.data import DataLoader
 
 """Defined dataset class"""
 class RFCXDataset(torch.utils.data.Dataset):
-    def __init__(self, manifest_pd=None, feat_type="fbank", num_classess=24, chunk_size=1000, data_dir=None):
+    def __init__(self, manifest_pd=None, feat_type="fbank", num_classess=24, chunk_size=1000, data_dir=None, audio_aug=True):
         self.data_dir = data_dir
         self.manifest_pd = manifest_pd
         self.feat_type = feat_type
@@ -22,7 +24,7 @@ class RFCXDataset(torch.utils.data.Dataset):
         self.feat_config = self.KaldiFeatConfig()
         self.except_length = chunk_size * self.feat_config["frame_shift"] / 1000 # frame_shift is ms
         self.use_resnet = True
-        self.audio_aug = True
+        self.audio_aug = audio_aug
 
     def __len__(self):
         return len(self.manifest_pd)
@@ -85,9 +87,16 @@ class RFCXDataset(torch.utils.data.Dataset):
             t_end = int(t_max*sr + 2*padding - t_min*sr)
         else:
             t_end = int(t_max*sr + padding)
-        cut_wav = wav[0][t_start:t_end+1]
+        
+        if t_end > int(60 * sr):
+            t_start = int(60 *sr - self.chunk_size * 0.01 * sr)
+            cut_wav = wav[0][t_start:]
+        else:
+            cut_wav = wav[0][t_start:t_end]
 
-        return cut_wav.view(1, -1)
+        cut_wav = cut_wav.view(1, -1)
+
+        return cut_wav
 
     def audio_augment(self, wav):
         """
@@ -112,6 +121,17 @@ class RFCXDataset(torch.utils.data.Dataset):
         wav = wav.view(1, -1)
 
         return wav, speed
+    
+    def get_white_noise(self, wav, SNR) :
+        wav = wav[0].numpy()
+        RMS_s = math.sqrt(np.mean(wav**2))
+        RMS_n = math.sqrt(RMS_s**2/(pow(10,SNR/10)))
+        STD_n = RMS_n
+        noise = np.random.normal(0, STD_n, wav.shape[0])
+        noise = torch.from_numpy(noise)
+        noise = noise.type(torch.float)
+
+        return noise
 
     def AddDeltaFeatStack(self, feat: torch.Tensor):
         """
@@ -150,7 +170,12 @@ class RFCXDataset(torch.utils.data.Dataset):
 
         """read audio from torchaudio and cut audio in self.chunk size"""
         wav, sr = torchaudio.load("{}/train/{}.flac".format(self.data_dir, recording_id))
-        aug_wav, aug_speed = self.audio_augment(wav=wav)
+        
+        if self.audio_aug:
+            aug_wav, aug_speed = self.audio_augment(wav=wav)
+            SNR = np.random.choice([20, 15, 10])
+            noise = self.get_white_noise(wav, SNR=SNR)
+            aug_noise_wav = wav + noise
 
         audio_list = []
         # general audio
@@ -165,18 +190,24 @@ class RFCXDataset(torch.utils.data.Dataset):
 
         """Augment audio"""
         if self.audio_aug:
+            aug_wav, aug_speed = self.audio_augment(wav=wav)
             t_max = t_max / aug_speed
             t_min = t_min / aug_speed
             if (t_max - t_min) > self.except_length:
                 aug_cut_audio = self.cut_wav(aug_wav, sr, t_min, t_max)
+                aug_noise_cut_audio = self.cut_wav(aug_noise_wav, sr, t_min, t_max)
             else:
                 padded_s = self.except_length - (t_max - t_min)
                 padded_sample = padded_s * sr / 2
                 aug_cut_audio = self.cut_wav(aug_wav, sr, t_min, t_max, padding=padded_sample)
+                aug_noise_cut_audio = self.cut_wav(aug_noise_wav, sr, t_min, t_max, padding=padded_sample)
             
             audio_list.append(aug_cut_audio)
+            audio_list.append(aug_noise_cut_audio)
+            target_list.append(target)
             target_list.append(target)
             uttid_list.append(recording_id+"_aug")
+            uttid_list.append(recording_id+"_aug_noise")
         
         """Extract feature"""
         feats_list = []
@@ -255,20 +286,31 @@ def test_dataset():
     import matplotlib.pyplot as plt
     rfcx_dir = "/home/haka/meng/RFCX/rfcx"
     train_tp_pd = pd.read_csv(os.path.join(rfcx_dir, "train_tp.csv"))
-    train_fp_pd = pd.read_csv(os.path.join(rfcx_dir, "train_fp.csv"))
-    test_pd = pd.read_csv(os.path.join(rfcx_dir, "sample_submission.csv"))
-
-    dataset = RFCXDataset(manifest_pd=train_tp_pd, feat_type="spectrogram", data_dir=rfcx_dir)
-    uttid_list, feat_list, target_list = dataset[0]
     
-    for i in target_list:
-        print(i.shape)
+    dataset_spec = RFCXDataset(manifest_pd=train_tp_pd, feat_type="spectrogram", data_dir=rfcx_dir)
+    dataset_fbank = RFCXDataset(manifest_pd=train_tp_pd, feat_type="fbank", data_dir=rfcx_dir)
+    dataset_mfcc = RFCXDataset(manifest_pd=train_tp_pd, feat_type="mfcc", data_dir=rfcx_dir)
+    
+    _, feat_list_spec, _ = dataset_spec[0]
+    _, feat_list_fbank, _ = dataset_fbank[0]
+    _, feat_list_mfcc, _ = dataset_mfcc[0]
+    
+    
+    fig, ax = plt.subplots(3, 3)
+    ax[0][0].imshow(feat_list_spec[0][0], origin="lower")
+    ax[0][1].imshow(feat_list_spec[0][1], origin="lower")
+    ax[0][2].imshow(feat_list_spec[0][2], origin="lower")
+    ax[0][0].set_title("Spectrogram")
 
-    fig, ax = plt.subplots(2, 3)
-    for i in range(len(feat_list)):
-        for j in range(3):
-            ax[i][j].imshow(feat_list[i][j], origin="lower")
-            ax[i][j].set_title("{}_{}".format(uttid_list[i], j))
+    ax[1][0].imshow(feat_list_fbank[0][0], origin="lower")
+    ax[1][1].imshow(feat_list_fbank[0][1], origin="lower")
+    ax[1][2].imshow(feat_list_fbank[0][2], origin="lower")
+    ax[1][0].set_title("Fbank")
+
+    ax[2][0].imshow(feat_list_mfcc[0][0], origin="lower")
+    ax[2][1].imshow(feat_list_mfcc[0][1], origin="lower")
+    ax[2][2].imshow(feat_list_mfcc[0][2], origin="lower")
+    ax[2][0].set_title("MFCC")
     
     fig.tight_layout()
     plt.show()
@@ -277,11 +319,8 @@ def test_dataset():
 def test_dataloader():
     rfcx_dir = "/home/haka/meng/RFCX/rfcx"
     train_tp_pd = pd.read_csv(os.path.join(rfcx_dir, "train_tp.csv"))
-    train_fp_pd = pd.read_csv(os.path.join(rfcx_dir, "train_fp.csv"))
-    test_pd = pd.read_csv(os.path.join(rfcx_dir, "sample_submission.csv"))
-
     dataset = RFCXDataset(manifest_pd=train_tp_pd, feat_type="fbank", data_dir=rfcx_dir)
-    dataloader = get_rfcx_dataloader(dataset=dataset, batch_size=2, shuffle=False, num_workers=0)
+    dataloader = get_rfcx_dataloader(dataset=dataset, batch_size=2, shuffle=True, num_workers=0)
 
     i = 0
     for batch in dataloader:
@@ -292,7 +331,8 @@ def test_dataloader():
         if i > 5:
             break
 
+
 if __name__ == "__main__":
-    # test_dataset()
-    test_dataloader()
+    test_dataset()
+    # test_dataloader()
     

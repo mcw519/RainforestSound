@@ -1,13 +1,15 @@
+# Copyright 2021 (author: Meng Wu)
+
 from dataset import RFCXDataset
 import torchaudio
 import torch
 from torch.utils.data import DataLoader
 import os
-from model import ResnetRFCX
+from model import ResnetMishRFCX, ResnetRFCX, ResNeStMishRFCX, EnsembleModel
 from train import load_ckpt
 import math
 from skimage.transform import resize
-
+import argparse
 
 
 class RFCXDatasetEval(RFCXDataset):
@@ -34,15 +36,15 @@ class RFCXDatasetEval(RFCXDataset):
         
         wav, sr = torchaudio.load(wav_path)
         
-        num_segment = math.ceil(wav.shape[1] / sr / (self.chunk_size*0.01))
-
+        num_segment = math.ceil(wav.shape[1] / sr / (self.chunk_size*0.01/2)) # overlap half
         begin = 0
         feat_list = []
         for i in range(num_segment):
-            wav_end = begin + int(sr*self.chunk_size*0.01) + 1
-            if wav_end < wav.shape[1]:
+            wav_end = begin + int(sr*self.chunk_size*0.01)
+            if wav_end <= wav.shape[1]:
                 cut_wav = wav[0][begin: wav_end].view(1, -1)
-                begin += int(sr*self.chunk_size*0.01)
+
+                begin += int(sr*self.chunk_size*0.01/2) # overlap half
 
                 if self.feat_type == "mfcc":
                     feats = self.KaldiMfcc(cut_wav)
@@ -58,8 +60,8 @@ class RFCXDatasetEval(RFCXDataset):
                     feats = self.AddDeltaFeatStack(feats)
                     feats = feats.permute(0, 2, 1)
                     resnet_feat_list = []
-                    for i in range(3):
-                        temp = torch.from_numpy(resize(feats[i], (224, 400)))
+                    for j in range(3):
+                        temp = torch.from_numpy(resize(feats[j], (224, 400)))
                         temp = temp - torch.min(temp)
                         temp = temp / torch.max(temp)
                         resnet_feat_list.append(temp)
@@ -68,7 +70,8 @@ class RFCXDatasetEval(RFCXDataset):
                     feats = torch.stack(resnet_feat_list)
                     del resnet_feat_list
 
-                feat_list.append(feats)        
+                feat_list.append(feats)
+
         feats = torch.stack(feat_list)
         # should be [N, 3, 224, 400]
         # print(feats.shape)
@@ -116,22 +119,58 @@ def get_rfcx_eval_dataloader(dataset: torch.utils.data.Dataset, batch_size=1, sh
     return dataloader
 
 
-def SubmitRFCS(eval_folder, model_path):
+def SubmitRFCS(args):
     device = "cpu"
-    batch_size = 4
-    model = ResnetRFCX(hidden_dim=1024, output_dim=24)
+    batch_size = 16
 
-    load_ckpt(model_path, model)
+    if args.from_anti_model:
+        outdim = 24*2
+    else:
+        outdim = 24
+
+    if args.ensemble:
+        model_list = []
+        for ckpt in args.ckpt_path, args.ensembleB, args.ensembleC, args.ensembleD, args.ensembleE:
+            if args.model_type == "ResnetRFCX":
+                model = ResnetRFCX(1024, outdim)
+            elif args.model_type == "ResnetMishRFCX":
+                model = ResnetMishRFCX(1024, outdim)
+            elif args.model_type == "ResNeStMishRFCX":
+                model = ResNeStMishRFCX(1024, outdim)
+            else:
+                raise NameError
+        
+            load_ckpt(ckpt, model)
+            model.to(device)
+            model_list.append(model)
+        
+        model = EnsembleModel(model_list[0], model_list[1], model_list[2], model_list[3], model_list[4])
+
+    else:
+        if args.model_type == "ResnetRFCX":
+            model = ResnetRFCX(1024, outdim)
+        elif args.model_type == "ResnetMishRFCX":
+            model = ResnetMishRFCX(1024, outdim)
+        elif args.model_type == "ResNeStMishRFCX":
+            model = ResNeStMishRFCX(1024, outdim)
+        else:
+            raise NameError
+
+        load_ckpt(args.ckpt_path, model)
+    
     model.to(device)
     model.eval()
-    dataset = RFCXDatasetEval(eval_folder, feat_type="fbank", chunk_size=1000)
+    
+    dataset = RFCXDatasetEval(args.eval_folder, feat_type=args.feature_type, chunk_size=1000)
     dataloader = get_rfcx_eval_dataloader(dataset, batch_size=batch_size, shuffle=False)
 
     total_file = len(dataset)
     submit_dct = {}
+    submit_avg_dct = {}
 
     for batch_idx, batch in enumerate(dataloader):
         uttid_list, feats, feat_len_list = batch
+
         feats = feats.to(device)
         
         with torch.no_grad():
@@ -146,21 +185,33 @@ def SubmitRFCS(eval_folder, model_path):
             feat_len = feat_len_list[i]
             
             result = output[first:first + feat_len, :] #.split(1, 0)
+            if args.ensemble:
+                result = result[:, :24]
+            else:
+                result = torch.sigmoid(result[:, :24])
             
             if result.shape[0] == 1:
                 pred_id = result
+                pred_id_avg = result
             else:
                 pred_id = torch.max(result, dim=0)[0]
+                pred_id_avg = result.mean(dim=0)
 
             first += feat_len
             submit_dct[uttid] = [ str(i) for i in pred_id.tolist() ]
-        
+            submit_avg_dct[uttid] = [ str(i) for i in pred_id_avg.tolist() ]
+
         print("processing {}/{} files".format(len(submit_dct.keys()), total_file))
                 
-    with open("RFCX_submit.csv", "w") as f:
+    with open("RFCX_MAX_submit.csv", "w") as f:
         f.writelines("recording_id,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15,s16,s17,s18,s19,s20,s21,s22,s23" + "\n")
         for key in sorted(submit_dct.keys()):
             f.writelines(str(key) + "," + ",".join(submit_dct[key]) + "\n")
+    
+    with open("RFCX_AVG_submit.csv", "w") as f:
+        f.writelines("recording_id,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15,s16,s17,s18,s19,s20,s21,s22,s23" + "\n")
+        for key in sorted(submit_avg_dct.keys()):
+            f.writelines(str(key) + "," + ",".join(submit_avg_dct[key]) + "\n")
 
 
 def test_eval_dataloader():
@@ -179,6 +230,16 @@ def test_eval_dataloader():
 
 
 if __name__ == "__main__":
-    import sys
-    # test_eval_dataloader()
-    SubmitRFCS(sys.argv[1], sys.argv[2])
+    parser = argparse.ArgumentParser(description="evaluate model")
+    parser.add_argument("eval_folder", help="eval dir")
+    parser.add_argument("ckpt_path", help="ckpt model path")
+    parser.add_argument("--feature_type", help="spectrogram/fbank/mfcc", default="fbank")
+    parser.add_argument("--model_type", help="ResnetMishRFCX/ResnetRFCX/ResNeStMishRFCX", default="ResNeStMishRFCX")
+    parser.add_argument("--from_anti_model", help="model is anti-model", default=False, action="store_true")
+    parser.add_argument("--ensemble", help="do ensemble evaluation", default=False, action="store_true")
+    parser.add_argument("--ensembleB", help="ckpt B", default=None)
+    parser.add_argument("--ensembleC", help="ckpt C", default=None)
+    parser.add_argument("--ensembleD", help="ckpt D", default=None)
+    parser.add_argument("--ensembleE", help="ckpt E", default=None)
+    args = parser.parse_args()
+    SubmitRFCS(args)

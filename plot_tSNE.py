@@ -1,24 +1,45 @@
+# Show t-SNE features
+
+# Copyright 2021 (author: Meng Wu)
+
 import numpy as np
 from sklearn import manifold
 from train import RFCXDatasetLoad, get_rfcx_load_dataloader, load_ckpt
-from model import ResnetRFCX
+from model import ResnetMishRFCX, ResnetRFCX, ResNeStMishRFCX
 import torch
 import torch.nn as nn
 import plotly.express as px
+import argparse
 
 
-def main(feat_path, model_path):
+def main(args):
     #Prepare the data
     device = "cpu"
 
-    dataset = RFCXDatasetLoad(feats_path=feat_path)
-    dataloader = get_rfcx_load_dataloader(dataset=dataset, batch_size=4, shuffle=False, num_workers=0)
+    feat_path = args.feats_path
+    model_path = args.ckpt_path
 
-    model = ResnetRFCX(1024, 24)
+    dataset = RFCXDatasetLoad(feats_path=feat_path)
+    dataloader = get_rfcx_load_dataloader(dataset=dataset, batch_size=8, shuffle=False, num_workers=0)
+
+    if args.from_anti_model:
+        outdim = 24*2
+    else:
+        outdim = 24
+
+    if args.model_type == "ResnetRFCX":
+        model = ResnetRFCX(1024, outdim)
+    elif args.model_type == "ResnetMishRFCX":
+        model = ResnetMishRFCX(1024, outdim)
+    elif args.model_type == "ResNeStMishRFCX":
+        model = ResNeStMishRFCX(1024, outdim)
+    else:
+        raise NameError
+    
     load_ckpt(model_path, model)
 
     # remove fc layer
-    model = nn.Sequential(*(list(model.resnet.children())[:-1]))
+    model = nn.Sequential(*(list(model.children())[:-1]))
     model.to(device)
     model.eval()
 
@@ -40,8 +61,11 @@ def main(feat_path, model_path):
             
             # activation is [N, 2048]
             feature = model(feats)
-            feature = feature.squeeze(3)
-            feature = feature.squeeze(2)
+
+            if args.model_type != "ResNeStMishRFCX":
+                feature = feature.squeeze(3)
+                feature = feature.squeeze(2)
+                
             feature = np.array(feature.tolist())
 
             for i in range(utt_num):
@@ -85,6 +109,10 @@ def main(feat_path, model_path):
 
 
 if __name__ == "__main__":
-    import sys
-    # Usage: python plot_tSNE.py <feats path> <ckpt path>
-    main(sys.argv[1], sys.argv[2])
+    parser = argparse.ArgumentParser(description="Plot t-SNE features")
+    parser.add_argument("feats_path", help="featture path")
+    parser.add_argument("ckpt_path", help="checkpoint path")
+    parser.add_argument("--model_type", help="ResnetMishRFCX/ResnetRFCX/ResNeStMishRFCX", default="ResnetMishRFCX")
+    parser.add_argument("--from_anti_model", help="model is anti-model", default=False, action="store_true")
+    args = parser.parse_args()
+    main(args)
