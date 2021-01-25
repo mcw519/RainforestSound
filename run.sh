@@ -5,14 +5,14 @@
 # data dir
 rfcx_dir="rfcx"
 feats_dir="feats"
-exp_dir="exp_ResNeSt"
+exp_dir="exp_EfficientNetB0"
 
 # feats config
 feats_type="fbank" # spectrogram/fbank/mfcc
 kfold=5
 
 # model config
-model_type="ResNeStMishRFCX" # ResnetRFCX/ResnetMishRFCX/ResNeStMishRFCX
+model_type="EfficientNetB0" # ResnetRFCX/ResnetMishRFCX/ResNeStMishRFCX/EfficientNetB0
 antimodel="True" # train model with anti class on FP dataset 
 criterion="CrossEntropyLoss" # CrossEntropyLoss/BCEWithLogitsLoss
 
@@ -39,14 +39,14 @@ if [ $TRAIN -eq 1 ]; then
     echo "Training $model_type model with $criterion"
     echo "================================================="
     if [ $antimodel == "True" ]; then
-        for i in {0..$[$kfold - 1]; do
+        for i in $(seq 0 $[$kfold - 1]); do
             echo "Start training kfold$i"
             python train.py --model_type $model_type --criterion $criterion --antimodel --train_fp_feats $feats_dir/train_fp.feats \
                 $exp_dir/fold$i $feats_dir/train_tp_fold$i.feats $feats_dir/val_tp_fold$i.feats
         done
     
     else
-        for i in {0..$[$kfold - 1]; do
+        for i in $(seq 0 $[$kfold - 1]); do
             echo "Start training kfold$i"
             python train.py --model_type $model_type --criterion $criterion \
                 $exp_dir/fold$i $feats_dir/train_tp_fold$i.feats $feats_dir/val_tp_fold$i.feats
