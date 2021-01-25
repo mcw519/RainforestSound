@@ -5,7 +5,7 @@ import torchaudio
 import torch
 from torch.utils.data import DataLoader
 import os
-from model import ResnetMishRFCX, ResnetRFCX, ResNeStMishRFCX, EnsembleModel
+from model import ResnetMishRFCX, ResnetRFCX, ResNeStMishRFCX, EnsembleModel, EfficientNetB0
 from train import load_ckpt
 import math
 from skimage.transform import resize
@@ -137,6 +137,8 @@ def SubmitRFCS(args):
                 model = ResnetMishRFCX(1024, outdim)
             elif args.model_type == "ResNeStMishRFCX":
                 model = ResNeStMishRFCX(1024, outdim)
+            elif args.model_type == "EfficientNetB0":
+                model = EfficientNetB0(outdim)
             else:
                 raise NameError
         
@@ -153,6 +155,8 @@ def SubmitRFCS(args):
             model = ResnetMishRFCX(1024, outdim)
         elif args.model_type == "ResNeStMishRFCX":
             model = ResNeStMishRFCX(1024, outdim)
+        elif args.model_type == "EfficientNetB0":
+            model = EfficientNetB0(outdim)
         else:
             raise NameError
 
@@ -234,7 +238,7 @@ if __name__ == "__main__":
     parser.add_argument("eval_folder", help="eval dir")
     parser.add_argument("ckpt_path", help="ckpt model path")
     parser.add_argument("--feature_type", help="spectrogram/fbank/mfcc", default="fbank")
-    parser.add_argument("--model_type", help="ResnetMishRFCX/ResnetRFCX/ResNeStMishRFCX", default="ResNeStMishRFCX")
+    parser.add_argument("--model_type", help="ResnetMishRFCX/ResnetRFCX/ResNeStMishRFCX/EfficientNetB0", default="ResNeStMishRFCX")
     parser.add_argument("--from_anti_model", help="model is anti-model", default=False, action="store_true")
     parser.add_argument("--ensemble", help="do ensemble evaluation", default=False, action="store_true")
     parser.add_argument("--ensembleB", help="ckpt B", default=None)
