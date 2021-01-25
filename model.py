@@ -5,7 +5,29 @@ import torch.nn as nn
 from torch.autograd import Function
 from mish import Mish
 import torchaudio
+from efficientnet_pytorch import EfficientNet
 
+
+class EfficientNetB0(nn.Module):
+    def __init__(self, output_dim, is_training=False):
+        super().__init__()
+        self.is_training = is_training
+        if self.is_training:
+            self.specaug = SpecAugment(fill_value=0.0, freq_mask_length=20, time_mask_length=20)
+
+        self.efficient_net = EfficientNet.from_pretrained('efficientnet-b0')
+        self.class_species = nn.Linear(self.efficient_net._fc.in_features, output_dim)
+        self.efficient_net._fc = nn.Identity()
+    
+    def forward(self, x):
+        if self.is_training:
+            x = self.specaug(x)
+
+        feature = self.efficient_net(x)
+        species_out = self.class_species(feature)
+
+        return species_out
+        
 
 class EnsembleModel(nn.Module):
     def __init__(self, modelA, modelB, modelC, modelD, modelE):
@@ -30,8 +52,12 @@ class EnsembleModel(nn.Module):
 
 
 class ResNeStMishRFCX(nn.Module):
-    def __init__(self, hidden_dim, output_dim):
+    def __init__(self, hidden_dim, output_dim, is_training=False):
         super().__init__()
+        self.is_training = is_training
+        if self.is_training:
+            self.specaug = SpecAugment(fill_value=0.0, freq_mask_length=20, time_mask_length=20)
+        
         resnet = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50', pretrained=True)
         self.feature = nn.Sequential(*(list(resnet.children())[:-1]))
         replace_relu_to_mish(self.feature)
@@ -46,6 +72,9 @@ class ResNeStMishRFCX(nn.Module):
             )
     
     def forward(self, x):
+        if self.is_training:
+            x = self.specaug(x)
+
         feature = self.feature(x)
         species_out = self.class_species(feature)
         
@@ -92,7 +121,7 @@ class ResnetRFCX(nn.Module):
         super().__init__()
         self.is_training = is_training
         if self.is_training:
-            self.specaug = SpecAugment(fill_value=0.0, freq_make_length=20, time_mask_length=20)
+            self.specaug = SpecAugment(fill_value=0.0, freq_mask_length=20, time_mask_length=20)
 
         self.resnet = torch.hub.load('pytorch/vision:v0.6.0', 'resnet50', pretrained=True)
         self.resnet.fc = nn.Sequential(
@@ -118,11 +147,11 @@ class ResnetRFCX(nn.Module):
 
 
 class SpecAugment(nn.Module):
-    def __init__(self, fill_value=0.0, freq_make_length=10, time_mask_length=10):
+    def __init__(self, fill_value=0.0, freq_mask_length=10, time_mask_length=10):
         super().__init__()
 
         self.fill_value = fill_value
-        self.freq_make_length = freq_make_length
+        self.freq_mask_length = freq_mask_length
         self.time_mask_length = time_mask_length
 
     def forward(self, x):
@@ -133,7 +162,7 @@ class SpecAugment(nn.Module):
 
         for i in range(N):
             # mask freq
-            temp_feat = torchaudio.functional.mask_along_axis(x[i], mask_param=self.freq_make_length, mask_value=self.fill_value, axis=1)
+            temp_feat = torchaudio.functional.mask_along_axis(x[i], mask_param=self.freq_mask_length, mask_value=self.fill_value, axis=1)
             # mask time
             temp_feat = torchaudio.functional.mask_along_axis(temp_feat, mask_param=self.time_mask_length, mask_value=self.fill_value, axis=2)
             temp_list.append(temp_feat)
@@ -159,8 +188,18 @@ def test_models():
 
 def test_specaug():
     import matplotlib.pyplot as plt
-    x = torch.rand(2, 3, 224, 400)
-    specaug = SpecAugment(fill_value=0.0, freq_make_length=20, time_mask_length=20)
+    import pandas as pd
+    from dataset import RFCXDataset
+    import os
+
+    # x = torch.rand(2, 3, 224, 400)
+    rfcx_dir = "/home/haka/meng/RFCX/rfcx"
+    train_tp_pd = pd.read_csv(os.path.join(rfcx_dir, "train_tp.csv"))
+    dataset = RFCXDataset(manifest_pd=train_tp_pd, feat_type="fbank", data_dir=rfcx_dir)
+    _, x1, _ = dataset[0]
+    _, x2, _ = dataset[1]
+    x = torch.stack([x1[0], x2[0]])
+    specaug = SpecAugment(fill_value=0.0, freq_mask_length=20, time_mask_length=20)
     y = specaug(x)
     fig, ax = plt.subplots(2, 3)
     for i in range(2):
