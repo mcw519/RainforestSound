@@ -5,12 +5,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from model import ResnetRFCX, ResnetMishRFCX, ResNeStMishRFCX
+from model import ResnetRFCX, ResnetMishRFCX, ResNeStMishRFCX, EfficientNetB0
 import gc
 from metrics import LWLRAP, F1_loss
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 import argparse
+from functional import mixup_data, mixup_criterion
 
 
 class RFCXDatasetLoad(torch.utils.data.Dataset):
@@ -120,31 +121,47 @@ def train_one_epoch(dataloader, model, device, optimizer, current_epoch, criteri
     total_loss = 0.
     num = 0.
     total_precision = 0.
+    mixup = True
 
     num_repeat = 1
     for kk in range(num_repeat):
         for batch_idx, batch in enumerate(dataloader):
             optimizer.zero_grad()
             uttid_list, feats, target = batch
-            utt_num = len(uttid_list)
 
-            # feats is [N, T, C] or [N, 3, 224, 400]
-            feats = feats.to(device)
+            utt_num = len(uttid_list)
             
             # target is [N, 24]
             target = target.to("cpu")
-            labels = torch.argmax(target, dim=-1)
-            labels = labels.to(device)
+
+            if mixup:
+                inputs, targets_a, targets_b, lam = mixup_data(feats, target, device=device)
+                inputs = inputs.to(device)
+                labels_a = torch.argmax(targets_a, dim=-1)
+                labels_a = labels_a.to(device)
+                labels_b = torch.argmax(targets_b, dim=-1)
+                labels_b = labels_b.to(device)
+            else:
+                inputs = feats.to(device)
+                labels = torch.argmax(target, dim=-1)
+                labels = labels.to(device)
             
             # activation is [N, num_class]
-            activation = model(feats)
+            activation = model(inputs)
             
-            target = target.type_as(activation)
-
             if isinstance(criterion, nn.CrossEntropyLoss):
-                loss = criterion(activation, labels)
+                if mixup:
+                    loss = mixup_criterion(criterion, activation, labels_a, labels_b, lam)
+                else:
+                    loss = criterion(activation, labels)
             else:
-                loss = criterion(activation, target)
+                if mixup:
+                    targets_a = target.type_as(activation)
+                    targets_b = target.type_as(activation)
+                    loss = mixup_criterion(criterion, activation, targets_a, targets_b, lam)
+                else:
+                    target = target.type_as(activation)
+                    loss = criterion(activation, target)
 
             loss.backward()
 
@@ -227,6 +244,8 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
     total_tp_precision = 0.
     total_fp_precision =0.
     
+    mixup = True
+
     len_dataloader = min(len(tp_dataloader), len(fp_dataloader))
 
     num_repeat = 1
@@ -247,19 +266,36 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
             # target_tp = target_tp.to(device)
             labels_tp = torch.argmax(target_tp, dim=-1)
             labels_tp = labels_tp.to(device)
+
+            if mixup:
+                inputs_tp, targets_tp_a, targets_tp_b, lam = mixup_data(feats_tp, target_tp, device=device)
+                inputs_tp = inputs_tp.to(device)
+                labels_tp_a = torch.argmax(targets_tp_a, dim=-1)
+                labels_tp_a = labels_tp_a.to(device)
+                labels_tp_b = torch.argmax(targets_tp_b, dim=-1)
+                labels_tp_b = labels_tp_b.to(device)
+            else:
+                inputs_tp = feats_tp.to(device)
+                labels_tp = torch.argmax(target_tp, dim=-1)
+                labels_tp = labels_tp.to(device)
             
             # activation is [N, num_class]
-            activation_tp = model(feats_tp)
+            activation_tp = model(inputs_tp)
             
-            # type matching
-            target_tp = target_tp.type_as(activation_tp)
-            
-            # loss_tp = criterion(activation_tp, labels_tp)
             if isinstance(criterion, nn.CrossEntropyLoss):
-                loss_tp = criterion(activation_tp, labels_tp)
+                if mixup:
+                    loss_tp = mixup_criterion(criterion, activation_tp, labels_tp_a, labels_tp_b, lam)
+                else:
+                    loss_tp = criterion(activation_tp, labels_tp)
             else:
-                loss_tp = criterion(activation_tp, target_tp)
-            
+                if mixup:
+                    targets_tp_a = targets_tp_a.type_as(activation_tp)
+                    targets_tp_b = targets_tp_b.type_as(activation_tp)
+                    loss_tp = mixup_criterion(criterion, activation_tp, targets_tp_a, targets_tp_b, lam)
+                else:
+                    target_tp = target_tp.type_as(activation_tp)
+                    loss_tp = criterion(activation_tp, target_tp)
+
             total_tp_loss += loss_tp
             
             # train on FP data
@@ -275,16 +311,34 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
             labels_fp = torch.argmax(target_fp, dim=-1)
             labels_fp = labels_fp.to(device)
             
+            if mixup:
+                inputs_fp, targets_fp_a, targets_fp_b, lam = mixup_data(feats_fp, target_fp, device=device)
+                inputs_fp = inputs_fp.to(device)
+                labels_fp_a = torch.argmax(targets_fp_a, dim=-1)
+                labels_fp_a = labels_fp_a.to(device)
+                labels_fp_b = torch.argmax(targets_fp_b, dim=-1)
+                labels_fp_b = labels_fp_b.to(device)
+            else:
+                inputs_fp = feats_fp.to(device)
+                labels_fp = torch.argmax(target_fp, dim=-1)
+                labels_fp = labels_fp.to(device)
+
             # activation is [N, num_class]
-            activation_fp = model(feats_fp)
-            
-            # type matching
-            target_fp = target_fp.type_as(activation_fp)
+            activation_fp = model(inputs_fp)
             
             if isinstance(criterion, nn.CrossEntropyLoss):
-                loss_fp = criterion(activation_fp, labels_fp)
+                if mixup:
+                    loss_fp = mixup_criterion(criterion, activation_fp, labels_fp_a, labels_fp_b, lam)
+                else:
+                    loss_fp = criterion(activation_fp, labels_fp)
             else:
-                loss_fp = criterion(activation_fp, target_fp)
+                if mixup:
+                    targets_fp_a = targets_fp_a.type_as(activation_fp)
+                    targets_fp_b = targets_fp_b.type_as(activation_fp)
+                    loss_fp = mixup_criterion(criterion, activation_fp, targets_fp_a, targets_fp_b, lam)
+                else:
+                    target_fp = target_fp.type_as(activation_fp)
+                    loss_fp = criterion(activation_fp, target_fp)
             
             total_fp_loss += loss_fp
             
@@ -311,7 +365,7 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
                 print("batch {}/{} ({:.2f}%) ({}/{}), loss {:.5f}, average {:.5f}, lwlrap {:.5f}, TP loss {:.5f} lwlrap {:.5f}, FP loss {:.5f} lwlrap {:.5f}".format(batch_idx, len_dataloader,
                             float(batch_idx) / len_dataloader * 100, kk, num_repeat, loss.item(), total_loss / num / 2, total_precision / num / 2, total_tp_loss / num, total_tp_precision / num, total_fp_loss / num, total_fp_precision / num))
             
-            del batch_idx, batch_tp, batch_fp, feats_tp, feats_fp, target_tp, target_fp, labels_tp, labels_fp, activation_tp, activation_fp, loss, loss_tp, loss_fp
+            # del batch_idx, batch_tp, batch_fp, feats_tp, feats_fp, target_tp, target_fp, labels_tp, labels_fp, activation_tp, activation_fp, loss, loss_tp, loss_fp
             gc.collect()
             torch.cuda.empty_cache()
     
@@ -377,9 +431,11 @@ def main(args):
     if args.model_type == "ResnetRFCX":
         model = ResnetRFCX(1024, out_dim, is_training=True)
     elif args.model_type == "ResnetMishRFCX":
-        model = ResnetMishRFCX(1024, out_dim)
+        model = ResnetMishRFCX(1024, out_dim, is_training=True)
     elif args.model_type == "ResNeStMishRFCX":
-        model = ResNeStMishRFCX(1024, out_dim)
+        model = ResNeStMishRFCX(1024, out_dim, is_training=True)
+    elif args.model_type == "EfficientNetB0":
+        model = EfficientNetB0(out_dim, is_training=True)
     else:
         raise NameError
 
@@ -505,7 +561,7 @@ if __name__ == "__main__":
     parser.add_argument("exp_dir", help="output dir")
     parser.add_argument("train_feats", help="train feats path")
     parser.add_argument("cv_feats", help="cv feats path")
-    parser.add_argument("--model_type", help="ResnetRFCX/ResnetMishRFCX/ResNeStMishRFCX", default="ResNeStMishRFCX")
+    parser.add_argument("--model_type", help="ResnetRFCX/ResnetMishRFCX/ResNeStMishRFCX/EfficientNetB0", default="ResNeStMishRFCX")
     parser.add_argument("--criterion", help="CrossEntropyLoss/BCEWithLogitsLoss", default="CrossEntropyLoss")
     parser.add_argument("--antimodel", help="train model with anti class", default=False, action="store_true")
     parser.add_argument("--train_fp_feats", help="train model with anti class", default=None)
