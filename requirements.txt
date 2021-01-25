@@ -4,3 +4,4 @@ torchaudio
 sox
 plotly
 scikit-image
+efficientnet_pytorch
