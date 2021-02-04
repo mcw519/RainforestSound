@@ -5,9 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from model import ResnetRFCX, ResnetMishRFCX, ResNeStMishRFCX, EfficientNetB0
+from model import RFCXmodel
 import gc
-from metrics import LWLRAP, F1_loss
+from metrics import LWLRAP
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 import argparse
@@ -428,14 +428,14 @@ def main(args):
     else:
         out_dim = 24
 
-    if args.model_type == "ResnetRFCX":
-        model = ResnetRFCX(1024, out_dim, is_training=True)
-    elif args.model_type == "ResnetMishRFCX":
-        model = ResnetMishRFCX(1024, out_dim, is_training=True)
-    elif args.model_type == "ResNeStMishRFCX":
-        model = ResNeStMishRFCX(1024, out_dim, is_training=True)
+    if args.model_type == "ResNeSt50":
+        model = RFCXmodel(out_dim, backbone=args.model_type, activation=args.activation)
     elif args.model_type == "EfficientNetB0":
-        model = EfficientNetB0(out_dim, is_training=True)
+        model = RFCXmodel(out_dim, backbone=args.model_type, activation=args.activation)
+    elif args.model_type == "EfficientNetB1":
+        model = RFCXmodel(out_dim, backbone=args.model_type, activation=args.activation)
+    elif args.model_type == "EfficientNetB2":
+        model = RFCXmodel(out_dim, backbone=args.model_type, activation=args.activation)
     else:
         raise NameError
 
@@ -561,7 +561,8 @@ if __name__ == "__main__":
     parser.add_argument("exp_dir", help="output dir")
     parser.add_argument("train_feats", help="train feats path")
     parser.add_argument("cv_feats", help="cv feats path")
-    parser.add_argument("--model_type", help="ResnetRFCX/ResnetMishRFCX/ResNeStMishRFCX/EfficientNetB0", default="ResNeStMishRFCX")
+    parser.add_argument("--model_type", help="EfficientNetB0/EfficientNetB1/EfficientNetB2/ResNeSt50", default="ResNeSt50")
+    parser.add_argument("--activation", help="mish/selu", default=None)
     parser.add_argument("--criterion", help="CrossEntropyLoss/BCEWithLogitsLoss", default="CrossEntropyLoss")
     parser.add_argument("--antimodel", help="train model with anti class", default=False, action="store_true")
     parser.add_argument("--train_fp_feats", help="train model with anti class", default=None)

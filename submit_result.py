@@ -5,7 +5,7 @@ import torchaudio
 import torch
 from torch.utils.data import DataLoader
 import os
-from model import ResnetMishRFCX, ResnetRFCX, ResNeStMishRFCX, EnsembleModel, EfficientNetB0
+from model import RFCXmodel, EnsembleModel
 from train import load_ckpt
 import math
 from skimage.transform import resize
@@ -131,17 +131,17 @@ def SubmitRFCS(args):
     if args.ensemble:
         model_list = []
         for ckpt in args.ckpt_path, args.ensembleB, args.ensembleC, args.ensembleD, args.ensembleE:
-            if args.model_type == "ResnetRFCX":
-                model = ResnetRFCX(1024, outdim)
-            elif args.model_type == "ResnetMishRFCX":
-                model = ResnetMishRFCX(1024, outdim)
-            elif args.model_type == "ResNeStMishRFCX":
-                model = ResNeStMishRFCX(1024, outdim)
+            if args.model_type == "ResNeSt50":
+                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
             elif args.model_type == "EfficientNetB0":
-                model = EfficientNetB0(outdim)
+                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+            elif args.model_type == "EfficientNetB1":
+                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+            elif args.model_type == "EfficientNetB2":
+                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
             else:
                 raise NameError
-        
+            
             load_ckpt(ckpt, model)
             model.to(device)
             model_list.append(model)
@@ -149,14 +149,14 @@ def SubmitRFCS(args):
         model = EnsembleModel(model_list[0], model_list[1], model_list[2], model_list[3], model_list[4])
 
     else:
-        if args.model_type == "ResnetRFCX":
-            model = ResnetRFCX(1024, outdim)
-        elif args.model_type == "ResnetMishRFCX":
-            model = ResnetMishRFCX(1024, outdim)
-        elif args.model_type == "ResNeStMishRFCX":
-            model = ResNeStMishRFCX(1024, outdim)
+        if args.model_type == "ResNeSt50":
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
         elif args.model_type == "EfficientNetB0":
-            model = EfficientNetB0(outdim)
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+        elif args.model_type == "EfficientNetB1":
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+        elif args.model_type == "EfficientNetB2":
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
         else:
             raise NameError
 
@@ -238,7 +238,8 @@ if __name__ == "__main__":
     parser.add_argument("eval_folder", help="eval dir")
     parser.add_argument("ckpt_path", help="ckpt model path")
     parser.add_argument("--feature_type", help="spectrogram/fbank/mfcc", default="fbank")
-    parser.add_argument("--model_type", help="ResnetMishRFCX/ResnetRFCX/ResNeStMishRFCX/EfficientNetB0", default="ResNeStMishRFCX")
+    parser.add_argument("--model_type", help="EfficientNetB0/EfficientNetB1/EfficientNetB2/ResNeSt50", default="ResNeSt50")
+    parser.add_argument("--activation", help="mish/selu", default=None)
     parser.add_argument("--from_anti_model", help="model is anti-model", default=False, action="store_true")
     parser.add_argument("--ensemble", help="do ensemble evaluation", default=False, action="store_true")
     parser.add_argument("--ensembleB", help="ckpt B", default=None)

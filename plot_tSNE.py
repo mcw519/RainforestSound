@@ -5,7 +5,7 @@
 import numpy as np
 from sklearn import manifold
 from train import RFCXDatasetLoad, get_rfcx_load_dataloader, load_ckpt
-from model import ResnetMishRFCX, ResnetRFCX, ResNeStMishRFCX
+from model import RFCXmodel
 import torch
 import torch.nn as nn
 import plotly.express as px
@@ -27,12 +27,14 @@ def main(args):
     else:
         outdim = 24
 
-    if args.model_type == "ResnetRFCX":
-        model = ResnetRFCX(1024, outdim)
-    elif args.model_type == "ResnetMishRFCX":
-        model = ResnetMishRFCX(1024, outdim)
-    elif args.model_type == "ResNeStMishRFCX":
-        model = ResNeStMishRFCX(1024, outdim)
+    if args.model_type == "ResNeSt50":
+        model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+    elif args.model_type == "EfficientNetB0":
+        model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+    elif args.model_type == "EfficientNetB1":
+        model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+    elif args.model_type == "EfficientNetB2":
+        model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
     else:
         raise NameError
     
@@ -47,7 +49,7 @@ def main(args):
     feature_dct = {}
     idx = 0
 
-    for batch_idx, batch in enumerate(dataloader):
+    for _, batch in enumerate(dataloader):
 
         with torch.no_grad():
             uttid_list, feats, target = batch
@@ -62,9 +64,9 @@ def main(args):
             # activation is [N, 2048]
             feature = model(feats)
 
-            if args.model_type != "ResNeStMishRFCX":
-                feature = feature.squeeze(3)
-                feature = feature.squeeze(2)
+            # if args.model_type != "ResNeStMishRFCX":
+            #     feature = feature.squeeze(3)
+            #     feature = feature.squeeze(2)
                 
             feature = np.array(feature.tolist())
 
@@ -112,7 +114,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot t-SNE features")
     parser.add_argument("feats_path", help="featture path")
     parser.add_argument("ckpt_path", help="checkpoint path")
-    parser.add_argument("--model_type", help="ResnetMishRFCX/ResnetRFCX/ResNeStMishRFCX", default="ResnetMishRFCX")
+    parser.add_argument("--model_type", help="EfficientNetB0/EfficientNetB1/EfficientNetB2/ResNeSt50", default="ResNeSt50")
+    parser.add_argument("--activation", help="mish/selu", default=None)
     parser.add_argument("--from_anti_model", help="model is anti-model", default=False, action="store_true")
     args = parser.parse_args()
     main(args)

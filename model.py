@@ -8,26 +8,76 @@ import torchaudio
 from efficientnet_pytorch import EfficientNet
 
 
-class EfficientNetB0(nn.Module):
-    def __init__(self, output_dim, is_training=False):
+class RFCXmodel(nn.Module):
+    def __init__(self, output_dim, backbone="EfficientNetB0", is_training=False, activation=None):
         super().__init__()
+
+        self.backbone = backbone
         self.is_training = is_training
+
         if self.is_training:
             self.specaug = SpecAugment(fill_value=0.0, freq_mask_length=20, time_mask_length=20)
 
-        self.efficient_net = EfficientNet.from_pretrained('efficientnet-b0')
-        self.class_species = nn.Linear(self.efficient_net._fc.in_features, output_dim)
-        self.efficient_net._fc = nn.Identity()
+        print("Using model type is {}".format(backbone))
+        
+        if backbone == "EfficientNetB0":
+            self.efficient_net = EfficientNet.from_pretrained('efficientnet-b0')
+            self.class_species = nn.Linear(self.efficient_net._fc.in_features, output_dim)
+            self.efficient_net._fc = nn.Identity()
+        
+        elif backbone == "EfficientNetB1":
+            self.efficient_net = EfficientNet.from_pretrained('efficientnet-b1')
+            self.class_species = nn.Linear(self.efficient_net._fc.in_features, output_dim)
+            self.efficient_net._fc = nn.Identity()
+        
+        elif backbone == "EfficientNetB2":
+            self.efficient_net = EfficientNet.from_pretrained('efficientnet-b2')
+            self.class_species = nn.Linear(self.efficient_net._fc.in_features, output_dim)
+            self.efficient_net._fc = nn.Identity()
+        
+        elif backbone == "ResNeSt50":
+            resnet = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50', pretrained=True)
+            self.feature = nn.Sequential(*(list(resnet.children())[:-1]))
+            self.class_species = nn.Sequential(
+                nn.Linear(2048, 1024),
+                nn.ReLU(),
+                nn.Dropout(p=0.2),
+                nn.Linear(1024, 1024),
+                nn.ReLU(),
+                nn.Dropout(p=0.2),
+                nn.Linear(1024, output_dim)
+                )
+        
+        else:
+            raise NameError
+
+        if activation is not None and backbone == "ResNeSt50":
+            print("With {} active function".format(activation))
+            if activation == "SELU" or activation == "selu":
+                replace_relu_to_selu(self.feature)
+                replace_relu_to_selu(self.class_species)
+            
+            elif activation == "MISH" or activation == "mish":
+                replace_relu_to_mish(self.feature)
+                replace_relu_to_mish(self.class_species)
+        
+        else:
+            print("With origin active function")
     
     def forward(self, x):
         if self.is_training:
             x = self.specaug(x)
 
-        feature = self.efficient_net(x)
+        if self.backbone == "ResNeSt50":
+            feature = self.feature(x)
+        
+        else:
+            feature = self.efficient_net(x)
+        
         species_out = self.class_species(feature)
 
         return species_out
-        
+
 
 class EnsembleModel(nn.Module):
     def __init__(self, modelA, modelB, modelC, modelD, modelE):
@@ -51,60 +101,13 @@ class EnsembleModel(nn.Module):
         return result
 
 
-class ResNeStMishRFCX(nn.Module):
-    def __init__(self, hidden_dim, output_dim, is_training=False):
-        super().__init__()
-        self.is_training = is_training
-        if self.is_training:
-            self.specaug = SpecAugment(fill_value=0.0, freq_mask_length=20, time_mask_length=20)
-        
-        resnet = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50', pretrained=True)
-        self.feature = nn.Sequential(*(list(resnet.children())[:-1]))
-        replace_relu_to_mish(self.feature)
-        self.class_species = nn.Sequential(
-            nn.Linear(2048, hidden_dim),
-            Mish(),
-            nn.Dropout(p=0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            Mish(),
-            nn.Dropout(p=0.2),
-            nn.Linear(hidden_dim, output_dim)
-            )
-    
-    def forward(self, x):
-        if self.is_training:
-            x = self.specaug(x)
-
-        feature = self.feature(x)
-        species_out = self.class_species(feature)
-        
-        return species_out
-
-
-class ResnetMishRFCX(nn.Module):
-    def __init__(self, hidden_dim, output_dim):
-        super().__init__()
-        
-        resnet = torch.hub.load('pytorch/vision:v0.6.0', 'resnet50', pretrained=True)
-        self.feature = nn.Sequential(*(list(resnet.children())[:-1]))
-        # replace_relu_to_mish(self.feature)
-        self.class_species = nn.Sequential(
-            nn.Linear(2048, hidden_dim),
-            Mish(),
-            nn.Dropout(p=0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            Mish(),
-            nn.Dropout(p=0.2),
-            nn.Linear(hidden_dim, output_dim)
-            )
-    
-    def forward(self, x):
-        feature = self.feature(x)
-        feature = feature.squeeze(3)
-        feature = feature.squeeze(2)
-        species_out = self.class_species(feature)
-        
-        return species_out
+def replace_relu_to_selu(model):
+    for child_name, child in model.named_children():
+        if isinstance(child, nn.ReLU):
+            setattr(model, child_name, nn.SELU())
+        else:
+            # recurse
+            replace_relu_to_selu(child)
 
 
 def replace_relu_to_mish(model):
@@ -114,36 +117,6 @@ def replace_relu_to_mish(model):
         else:
             # recurse
             replace_relu_to_mish(child)
-
-
-class ResnetRFCX(nn.Module):
-    def __init__(self, hidden_dim, output_dim, is_training=False):
-        super().__init__()
-        self.is_training = is_training
-        if self.is_training:
-            self.specaug = SpecAugment(fill_value=0.0, freq_mask_length=20, time_mask_length=20)
-
-        self.resnet = torch.hub.load('pytorch/vision:v0.6.0', 'resnet50', pretrained=True)
-        self.resnet.fc = nn.Sequential(
-            nn.Linear(2048, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(hidden_dim, output_dim)
-            )
-        # only fine-tuned fc layer
-        # for para in list(self.resnet.parameters())[:-2]:
-        #     para.requires_grad=False
-    
-    def forward(self, x):
-        if self.is_training:
-            x = self.specaug(x)
-
-        x = self.resnet(x)
-
-        return x
 
 
 class SpecAugment(nn.Module):
@@ -175,9 +148,9 @@ class SpecAugment(nn.Module):
 def test_models():
     from metrics import LWLRAP
 
-    modelA = ResnetRFCX(1024, 24)
-    modelB = ResnetMishRFCX(1024, 24)
-    modelC = ResNeStMishRFCX(1024, 24)
+    modelA = RFCXmodel(output_dim=24, backbone="EfficientNetB0", is_training=True, activation="mish")
+    modelB = RFCXmodel(output_dim=24, backbone="EfficientNetB1", is_training=True, activation="selu")
+    modelC = RFCXmodel(output_dim=24, backbone="ResNeSt50", is_training=True, activation="selu")
 
     x = torch.rand(5, 3, 224, 400)
     
@@ -210,5 +183,5 @@ def test_specaug():
 
 
 if __name__ == "__main__":
-    # test_models()
+    test_models()
     test_specaug()

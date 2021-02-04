@@ -1,6 +1,6 @@
 # This program used to prepare feature for training
 
-# Copyright 2020 (author: Meng Wu)
+# Copyright 2021 (author: Meng Wu)
 
 from sklearn.model_selection import StratifiedKFold
 import torch
@@ -8,7 +8,7 @@ from dataset import RFCXDataset
 import pandas as pd
 import os
 import argparse
-
+from tqdm import tqdm
 
 class DumpFeature():
     def __init__(self, rfcx_dir, out_dir, feature_type="fbank", kfold=5):
@@ -26,13 +26,13 @@ class DumpFeature():
         num_aug = len(dataset[0][0])
         dct = {}
         idx = 0
-        for i in range(len(dataset)):
+        for i in tqdm(range(len(dataset))):
             uttid_list, feat_list, target_list = dataset[i]
             for uid in range(len(uttid_list)):
                 dct[idx] = [uttid_list[uid], feat_list[uid], target_list[uid]]
                 idx += 1
             
-            print("Finished {}/{} data".format(idx, len(dataset)*num_aug))
+            # print("Finished {}/{} data".format(idx, len(dataset)*num_aug))
 
         torch.save(dct, os.path.join(self.out_dir, "train_tp.feats"))
         del dataset, train_tp_pd, dct
@@ -43,13 +43,13 @@ class DumpFeature():
         num_aug = len(dataset[0][0])
         dct = {}
         idx = 0
-        for i in range(len(dataset)):
+        for i in tqdm(range(len(dataset))):
             uttid_list, feat_list, target_list = dataset[i]
             for uid in range(len(uttid_list)):
                 dct[idx] = [uttid_list[uid], feat_list[uid], target_list[uid]]
                 idx += 1
             
-            print("Finished {}/{} data".format(idx, len(dataset)*num_aug))
+            # print("Finished {}/{} data".format(idx, len(dataset)*num_aug))
         
         torch.save(dct, os.path.join(self.out_dir, "train_fp.feats"))
         del dataset, train_fp_pd, dct
@@ -124,9 +124,9 @@ class DumpFeature():
 
 def main(args):
     if args.load_feats is not None:
-        DumpFeature._split_data(feature_path=args.load_feats, out_dir=args.out_dir, kfold=args.kfold)
+        DumpFeature._split_data(feature_path=args.load_feats, out_dir=args.out_dir, kfold=int(args.kfold))
     else:
-        extractor = DumpFeature(rfcx_dir=args.rfcx_dir, out_dir=args.out_dir, feature_type=args.feature_type, kfold=args.kfold)
+        extractor = DumpFeature(rfcx_dir=args.rfcx_dir, out_dir=args.out_dir, feature_type=args.feature_type, kfold=int(args.kfold))
         extractor.run()
 
 

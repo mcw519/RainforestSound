@@ -3,6 +3,8 @@
 # Copyright 2021 (author: Meng Wu)
 
 import argparse
+
+from torch.nn.modules import activation
 from train import RFCXDatasetLoad, load_ckpt
 import matplotlib.pyplot as plt
 import torch.nn as nn
@@ -10,7 +12,7 @@ import torch.nn.functional as F
 import torch
 import numpy as np
 from skimage.transform import resize
-from model import ResnetMishRFCX, ResnetRFCX, ResNeStMishRFCX
+from model import RFCXmodel
 
 
 class ShowMachine():
@@ -41,11 +43,11 @@ class ShowMachine():
             fig.tight_layout()
             plt.show()
     
-    def CAM(self, idx, model):
+    def CAM(self, idx, model, backbone="resnest"):
         if not isinstance(idx, int):
             raise TypeError
 
-        model = CAMmodel(model)
+        model = CAMmodel(model, backbone=backbone)
         model.to("cpu")
         model.eval()
 
@@ -90,16 +92,26 @@ class ShowMachine():
 
 
 class CAMmodel(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, backbone="resnest"):
         super().__init__()
 
-        conv_list = list(model.children())[:-1]
-        conv_list = conv_list[0][:-1]
-        self.features_conv = nn.Sequential(*conv_list)
-        max_pool = list(model.children())[:-1]
-        max_pool = max_pool[0][-1]
-        self.max_pool = nn.Sequential(max_pool)
-        self.class_species = nn.Sequential(*(list(model.children())[-1]))
+        self.backbone = backbone
+
+        if backbone == "resnest":
+            conv_list = list(model.children())[:-1][0][:-1]
+            self.features_conv = nn.Sequential(*conv_list)
+            max_pool = list(model.children())[:-1][0][-1]
+            self.max_pool = nn.Sequential(max_pool)
+            self.class_species = nn.Sequential(*(list(model.children())[-1]))
+        
+        elif backbone == "efficientnet":
+            self.model = model
+            self.Enet = list(model.children())
+            max_pool = list(self.Enet[0].children())[-4]
+            others_list = list(self.Enet[0].children())[-3:]
+            self.max_pool = nn.Sequential(max_pool)
+            self.others = nn.Sequential(*others_list)
+            self.class_species = nn.Sequential(list(model.children())[-1])
 
         # placeholder for gradients
         self.gradients = None
@@ -108,31 +120,38 @@ class CAMmodel(nn.Module):
         self.gradients = grad
     
     def forward(self, x):
-        x = self.features_conv(x)
-        # register the hook
-        h = x.register_hook(self.activations_hook)
-        # apply remaining
-        x = self.max_pool(x)
-        x = torch.flatten(x, 1)
-        x = self.class_species(x)
 
-        return x
-    
+        if self.backbone == "resnest":
+            x = self.features_conv(x)
+            # register the hook
+            h = x.register_hook(self.activations_hook)
+            # apply remaining
+            x = self.max_pool(x)
+            x = self.class_species(x)
+
+            return x
+
+        elif self.backbone == "efficientnet":
+            x = self.Enet[0].extract_features(x)
+            # register the hook
+            h = x.register_hook(self.activations_hook)
+            # apply remaining
+            x = self.max_pool(x)
+            x = self.others(x)
+            x = x.flatten(start_dim=1)
+            x = self.class_species(x)
+
+            return x
+
     def get_activations_gradient(self):
         return self.gradients
     
     def get_activations(self, x):
-        return self.features_conv(x)
-
-
-def test():
-    from model import ResNeStMishRFCX
-    from train import load_ckpt
-
-    model = ResNeStMishRFCX(1024, 48)
-    load_ckpt("/home/haka/meng/RFCX/exp_ResNeSt/fold3/best_model.pt", model)
-    plotter = ShowMachine("/home/haka/meng/RFCX/feats/train_tp.feats")
-    plotter.CAM(0, model)
+        if self.backbone == "resnest":
+            return self.features_conv(x)
+        
+        elif self.backbone == "efficientnet":
+            return self.Enet[0].extract_features(x)
 
 
 def main(args):
@@ -144,17 +163,23 @@ def main(args):
         else:
             outdim = 24
 
-        if args.model_type == "ResnetRFCX":
-            model = ResnetRFCX(1024, outdim)
-        elif args.model_type == "ResnetMishRFCX":
-            model = ResnetMishRFCX(1024, outdim)
-        elif args.model_type == "ResNeStMishRFCX":
-            model = ResNeStMishRFCX(1024, outdim)
+        if args.model_type == "ResNeSt50":
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+            backbone = "resnest"
+        elif args.model_type == "EfficientNetB0":
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+            backbone = "efficientnet"
+        elif args.model_type == "EfficientNetB1":
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+            backbone = "efficientnet"
+        elif args.model_type == "EfficientNetB2":
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
+            backbone = "efficientnet"
         else:
             raise NameError
 
         load_ckpt(args.ckpt_path, model)
-        plotter.CAM(int(args.idx), model)
+        plotter.CAM(int(args.idx), model, backbone=backbone)
     
     else:
         plotter.plot(int(args.idx))
@@ -166,7 +191,8 @@ if __name__ == "__main__":
     parser.add_argument("idx", help="index in dataset")
     parser.add_argument("--CAM", help="plot grad-cam image", default=False, action="store_true")
     parser.add_argument("--ckpt_path", help="checkpoint path", default=None)
-    parser.add_argument("--model_type", help="ResnetMishRFCX/ResnetRFCX/ResNeStMishRFCX", default="ResnetMishRFCX")
+    parser.add_argument("--model_type", help="EfficientNetB0/EfficientNetB1/EfficientNetB2/ResNeSt50", default="ResNeSt50")
+    parser.add_argument("--activation", help="mish/selu", default=None)
     parser.add_argument("--from_anti_model", help="model is anti-model", default=False, action="store_true")
     args = parser.parse_args()
     main(args)
