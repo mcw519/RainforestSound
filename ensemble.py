@@ -1,6 +1,6 @@
-import os
+# Copyright 2021 (author: Meng Wu)
+
 import io
-import sys
 import torch
 import torch.nn.functional as F
 import argparse

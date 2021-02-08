@@ -8,6 +8,43 @@ import torchaudio
 from efficientnet_pytorch import EfficientNet
 
 
+class EMA():
+    """
+        Exponential moving average
+    """
+    def __init__(self, model, decay=0.995):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+
+    def register(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def update(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+                self.shadow[name] = new_average.clone()
+    
+    def apply_shadow(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+    
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
+
+
 class RFCXmodel(nn.Module):
     def __init__(self, output_dim, backbone="EfficientNetB0", is_training=False, activation=None):
         super().__init__()
@@ -48,18 +85,32 @@ class RFCXmodel(nn.Module):
                 nn.Linear(1024, output_dim)
                 )
         
+        elif backbone == "ResNeSt101":
+            resnet = torch.hub.load('zhanghang1989/ResNeSt', 'resnest101', pretrained=True)
+            self.feature = nn.Sequential(*(list(resnet.children())[:-1]))
+            self.class_species = nn.Sequential(
+                nn.Linear(2048, 1024),
+                nn.ReLU(),
+                nn.Dropout(p=0.2),
+                nn.Linear(1024, 1024),
+                nn.ReLU(),
+                nn.Dropout(p=0.2),
+                nn.Linear(1024, output_dim)
+                )
+        
         else:
             raise NameError
 
-        if activation is not None and backbone == "ResNeSt50":
-            print("With {} active function".format(activation))
-            if activation == "SELU" or activation == "selu":
-                replace_relu_to_selu(self.feature)
-                replace_relu_to_selu(self.class_species)
-            
-            elif activation == "MISH" or activation == "mish":
-                replace_relu_to_mish(self.feature)
-                replace_relu_to_mish(self.class_species)
+        if activation is not None:
+            if backbone == "ResNeSt50" or backbone == "ResNeSt101":
+                print("With {} active function".format(activation))
+                if activation == "SELU" or activation == "selu":
+                    replace_relu_to_selu(self.feature)
+                    replace_relu_to_selu(self.class_species)
+                
+                elif activation == "MISH" or activation == "mish":
+                    replace_relu_to_mish(self.feature)
+                    replace_relu_to_mish(self.class_species)
         
         else:
             print("With origin active function")
@@ -96,7 +147,6 @@ class EnsembleModel(nn.Module):
         E = self.modelE(x)
 
         result = (A+B+C+D+E)/5
-        result = torch.sigmoid(result)
         
         return result
 

@@ -10,15 +10,17 @@ from train import load_ckpt
 import math
 from skimage.transform import resize
 import argparse
-
+from others import MVG
+from tqdm import tqdm
 
 class RFCXDatasetEval(RFCXDataset):
-    def __init__(self, eval_folder, feat_type="spectrogram", chunk_size=1000):
+    def __init__(self, eval_folder, feat_type="spectrogram", chunk_size=1000, overlap_ratio=5):
         self.eval_folder = eval_folder
         self.file_list = self.read_folder()
         self.feat_type = feat_type # spectrogram / mfcc / fbank
         self.feat_config = self.KaldiFeatConfig()
         self.chunk_size = chunk_size
+        self.overlap_ratio = overlap_ratio
         self.except_length = chunk_size * self.feat_config["frame_shift"] / 1000 # frame_shift is ms
         self.use_resnet = True
     
@@ -36,7 +38,7 @@ class RFCXDatasetEval(RFCXDataset):
         
         wav, sr = torchaudio.load(wav_path)
         
-        num_segment = math.ceil(wav.shape[1] / sr / (self.chunk_size*0.01/2)) # overlap half
+        num_segment = math.ceil(wav.shape[1] / sr / (self.chunk_size*0.01*(1-self.overlap_ratio)))
         begin = 0
         feat_list = []
         for i in range(num_segment):
@@ -44,7 +46,7 @@ class RFCXDatasetEval(RFCXDataset):
             if wav_end <= wav.shape[1]:
                 cut_wav = wav[0][begin: wav_end].view(1, -1)
 
-                begin += int(sr*self.chunk_size*0.01/2) # overlap half
+                begin += int(self.chunk_size*sr*0.01*(1-self.overlap_ratio))
 
                 if self.feat_type == "mfcc":
                     feats = self.KaldiMfcc(cut_wav)
@@ -120,8 +122,9 @@ def get_rfcx_eval_dataloader(dataset: torch.utils.data.Dataset, batch_size=1, sh
 
 
 def SubmitRFCS(args):
-    device = "cpu"
-    batch_size = 16
+    # device = "cpu"
+    device = torch.device("cuda", 0)
+    batch_size = 1
 
     if args.from_anti_model:
         outdim = 24*2
@@ -165,14 +168,14 @@ def SubmitRFCS(args):
     model.to(device)
     model.eval()
     
-    dataset = RFCXDatasetEval(args.eval_folder, feat_type=args.feature_type, chunk_size=1000)
+    dataset = RFCXDatasetEval(args.eval_folder, feat_type=args.feature_type, chunk_size=1000, overlap_ratio=float(args.overlap_ratio))
     dataloader = get_rfcx_eval_dataloader(dataset, batch_size=batch_size, shuffle=False)
 
     total_file = len(dataset)
     submit_dct = {}
     submit_avg_dct = {}
 
-    for batch_idx, batch in enumerate(dataloader):
+    for _, batch in tqdm(enumerate(dataloader)):
         uttid_list, feats, feat_len_list = batch
 
         feats = feats.to(device)
@@ -189,10 +192,15 @@ def SubmitRFCS(args):
             feat_len = feat_len_list[i]
             
             result = output[first:first + feat_len, :] #.split(1, 0)
-            if args.ensemble:
-                result = result[:, :24]
-            else:
-                result = torch.sigmoid(result[:, :24])
+            
+            # chunk_class_prob = torch.log_softmax(result, dim=-1)[:, :24] # sigmoid is better than this
+            # segment_prob = torch.log_softmax(result, dim=0)[:, :24] # sigmoid is better than this
+            # result = chunk_class_prob * segment_prob
+
+            result = torch.sigmoid(result[:, :24])
+
+            if args.mvg:
+                result = MVG(result, left_context=0, right_context=3)
             
             if result.shape[0] == 1:
                 pred_id = result
@@ -238,9 +246,11 @@ if __name__ == "__main__":
     parser.add_argument("eval_folder", help="eval dir")
     parser.add_argument("ckpt_path", help="ckpt model path")
     parser.add_argument("--feature_type", help="spectrogram/fbank/mfcc", default="fbank")
+    parser.add_argument("--overlap_ratio", help="how much time overlap between each step", default=0.5)
     parser.add_argument("--model_type", help="EfficientNetB0/EfficientNetB1/EfficientNetB2/ResNeSt50", default="ResNeSt50")
     parser.add_argument("--activation", help="mish/selu", default=None)
     parser.add_argument("--from_anti_model", help="model is anti-model", default=False, action="store_true")
+    parser.add_argument("--mvg", help="moving average", default=False, action="store_true")
     parser.add_argument("--ensemble", help="do ensemble evaluation", default=False, action="store_true")
     parser.add_argument("--ensembleB", help="ckpt B", default=None)
     parser.add_argument("--ensembleC", help="ckpt C", default=None)

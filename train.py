@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from model import RFCXmodel
+from model import RFCXmodel, EMA
 import gc
 from metrics import LWLRAP
 from torch.nn.utils.rnn import pad_sequence
@@ -115,7 +115,7 @@ def save_ckpt_info(filename, model_path, current_epoch, learning_rate, loss, bes
         f.write("best epoch: {}\n".format(best_epoch))
 
 
-def train_one_epoch(dataloader, model, device, optimizer, current_epoch, criterion):
+def train_one_epoch(dataloader, model, device, optimizer, current_epoch, criterion, EMA=None):
     model.train()
     model.to(device)
     total_loss = 0.
@@ -166,6 +166,9 @@ def train_one_epoch(dataloader, model, device, optimizer, current_epoch, criteri
             loss.backward()
 
             optimizer.step()
+
+            if EMA is not None:
+                EMA.update()
 
             total_loss += loss
 
@@ -233,7 +236,7 @@ def get_cv_loss(cv_dataloader, model, current_epoch, criterion):
         print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, cv_precision / cv_num))
 
 
-def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer, current_epoch, criterion):
+def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer, current_epoch, criterion, EMA=None):
     model.train()
     model.to(device)
     total_loss = 0.
@@ -347,6 +350,9 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
             loss.backward()
 
             optimizer.step()
+            
+            if EMA is not None:
+                EMA.update()
 
             total_loss += loss
 
@@ -374,7 +380,8 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
 
 def get_cv_tpfp_loss(cv_dataloader, model, current_epoch, criterion):
     # cross validation loss
-    device = "cpu"
+    # device = "cpu"
+    device = torch.device("cuda", 0)
     cv_total_loss = 0.
     cv_num = 0.
     cv_precision = 0.
@@ -441,6 +448,10 @@ def main(args):
 
     model.to(device)
 
+    if args.ema:
+        ema = EMA(model=model)
+        ema.register()
+
     if args.criterion == "CrossEntropyLoss":
         criterion = nn.CrossEntropyLoss()
     elif args.criterion == "BCEWithLogitsLoss":
@@ -498,11 +509,14 @@ def main(args):
             learning_rate = param_group["lr"]
         
         if args.antimodel:
-            loss = train_one_tpfp_epoch(tp_dataloader=dataloader, fp_dataloader=fp_dataloader, model=model, device=device, optimizer=optimizer, current_epoch=epoch, criterion=criterion)
+            loss = train_one_tpfp_epoch(tp_dataloader=dataloader, fp_dataloader=fp_dataloader, model=model, device=device, optimizer=optimizer, current_epoch=epoch, criterion=criterion, EMA=ema)
             get_cv_tpfp_loss(cv_dataloader, model, epoch, criterion=criterion)
         else:
-            loss = train_one_epoch(dataloader=dataloader, model=model, device=device, optimizer=optimizer, current_epoch=epoch, criterion=criterion)
+            loss = train_one_epoch(dataloader=dataloader, model=model, device=device, optimizer=optimizer, current_epoch=epoch, criterion=criterion, EMA=ema)
             get_cv_loss(cv_dataloader, model, epoch, criterion=criterion)
+        
+        if args.ema:
+                ema.apply_shadow()
 
         # save best model
         if best_loss is None or best_loss > loss:
@@ -539,6 +553,9 @@ def main(args):
                                         best_loss=best_loss,
                                         best_epoch=best_epoch)
         
+        if args.ema:
+            ema.restore()
+        
         scheduler.step()
        
 
@@ -561,10 +578,11 @@ if __name__ == "__main__":
     parser.add_argument("exp_dir", help="output dir")
     parser.add_argument("train_feats", help="train feats path")
     parser.add_argument("cv_feats", help="cv feats path")
-    parser.add_argument("--model_type", help="EfficientNetB0/EfficientNetB1/EfficientNetB2/ResNeSt50", default="ResNeSt50")
+    parser.add_argument("--model_type", help="EfficientNetB0/EfficientNetB1/EfficientNetB2/ResNeSt50/ResNeSt101", default="ResNeSt50")
     parser.add_argument("--activation", help="mish/selu", default=None)
     parser.add_argument("--criterion", help="CrossEntropyLoss/BCEWithLogitsLoss", default="CrossEntropyLoss")
     parser.add_argument("--antimodel", help="train model with anti class", default=False, action="store_true")
+    parser.add_argument("--ema", help="train model with expotential moving average", default=False, action="store_true")
     parser.add_argument("--train_fp_feats", help="train model with anti class", default=None)
     args = parser.parse_args()
     main(args)
