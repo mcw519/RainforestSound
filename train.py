@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from model import RFCXmodel, EMA
 import gc
-from metrics import LWLRAP
+from metrics import LWLRAP, MetricMeter
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 import argparse
@@ -199,6 +199,8 @@ def get_cv_loss(cv_dataloader, model, current_epoch, criterion):
     model.to(device)
     model.eval()
 
+    scores = MetricMeter()
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(cv_dataloader):
             uttid_list, feats, target = batch
@@ -222,10 +224,11 @@ def get_cv_loss(cv_dataloader, model, current_epoch, criterion):
             else:
                 loss = criterion(activation, target)
 
-            precision = LWLRAP(target, activation)
+            scores.update(target, activation)
+            # precision = LWLRAP(target, activation)
 
             cv_total_loss += loss
-            cv_precision += precision
+            # cv_precision += precision
 
             cv_num += 1
 
@@ -233,7 +236,8 @@ def get_cv_loss(cv_dataloader, model, current_epoch, criterion):
             gc.collect()
             torch.cuda.empty_cache()
 
-        print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, cv_precision / cv_num))
+        # print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, cv_precision / cv_num))
+        print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, scores.avg))
 
 
 def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer, current_epoch, criterion, EMA=None):
@@ -246,6 +250,8 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
     total_precision = 0.
     total_tp_precision = 0.
     total_fp_precision =0.
+    scores_tp = MetricMeter()
+    scores_fp = MetricMeter()
     
     mixup = True
 
@@ -356,20 +362,25 @@ def train_one_tpfp_epoch(tp_dataloader, fp_dataloader, model, device, optimizer,
 
             total_loss += loss
 
-            precision_tp = LWLRAP(target_tp, activation_tp)
-            total_tp_precision += precision_tp
+            # precision_tp = LWLRAP(target_tp, activation_tp)
+            # total_tp_precision += precision_tp
+            scores_tp.update(target_tp, activation_tp)
             
-            precision_fp = LWLRAP(target_fp, activation_fp)
-            total_fp_precision += precision_fp
+            # precision_fp = LWLRAP(target_fp, activation_fp)
+            # total_fp_precision += precision_fp
+            scores_fp.update(target_fp, activation_fp)
             
-            total_precision += precision_tp
-            total_precision += precision_fp
+            # total_precision += precision_tp
+            # total_precision += precision_fp
             
             num += 1
 
+            # if batch_idx % 50 == 0:
+            #     print("batch {}/{} ({:.2f}%) ({}/{}), loss {:.5f}, average {:.5f}, lwlrap {:.5f}, TP loss {:.5f} lwlrap {:.5f}, FP loss {:.5f} lwlrap {:.5f}".format(batch_idx, len_dataloader,
+            #                 float(batch_idx) / len_dataloader * 100, kk, num_repeat, loss.item(), total_loss / num / 2, total_precision / num / 2, total_tp_loss / num, total_tp_precision / num, total_fp_loss / num, total_fp_precision / num))
             if batch_idx % 50 == 0:
-                print("batch {}/{} ({:.2f}%) ({}/{}), loss {:.5f}, average {:.5f}, lwlrap {:.5f}, TP loss {:.5f} lwlrap {:.5f}, FP loss {:.5f} lwlrap {:.5f}".format(batch_idx, len_dataloader,
-                            float(batch_idx) / len_dataloader * 100, kk, num_repeat, loss.item(), total_loss / num / 2, total_precision / num / 2, total_tp_loss / num, total_tp_precision / num, total_fp_loss / num, total_fp_precision / num))
+                    print("batch {}/{} ({:.2f}%) ({}/{}), loss {:.5f}, average {:.5f}, TP loss {:.5f} lwlrap {:.5f}, FP loss {:.5f} lwlrap {:.5f}".format(batch_idx, len_dataloader,
+                            float(batch_idx) / len_dataloader * 100, kk, num_repeat, loss.item(), total_loss / num / 2, total_tp_loss / num, scores_tp.avg, total_fp_loss / num, scores_fp.avg))
             
             # del batch_idx, batch_tp, batch_fp, feats_tp, feats_fp, target_tp, target_fp, labels_tp, labels_fp, activation_tp, activation_fp, loss, loss_tp, loss_fp
             gc.collect()
@@ -385,6 +396,8 @@ def get_cv_tpfp_loss(cv_dataloader, model, current_epoch, criterion):
     cv_total_loss = 0.
     cv_num = 0.
     cv_precision = 0.
+
+    scores = MetricMeter()
 
     model.to(device)
     model.eval()
@@ -411,10 +424,11 @@ def get_cv_tpfp_loss(cv_dataloader, model, current_epoch, criterion):
             else:
                 loss = criterion(activation, target)
 
-            precision = LWLRAP(target, activation)
+            # precision = LWLRAP(target, activation)
+            scores.update(target, activation)
 
             cv_total_loss += loss
-            cv_precision += precision
+            # cv_precision += precision
 
             cv_num += 1
 
@@ -422,7 +436,8 @@ def get_cv_tpfp_loss(cv_dataloader, model, current_epoch, criterion):
             gc.collect()
             torch.cuda.empty_cache()
 
-        print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, cv_precision / cv_num))
+        # print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, cv_precision / cv_num))
+        print("epoch {} cross-validation loss {} lwlrap {}".format(current_epoch, cv_total_loss / cv_num, scores.avg))
 
 
 
@@ -451,6 +466,8 @@ def main(args):
     if args.ema:
         ema = EMA(model=model)
         ema.register()
+    else:
+        ema = None
 
     if args.criterion == "CrossEntropyLoss":
         criterion = nn.CrossEntropyLoss()
@@ -510,10 +527,10 @@ def main(args):
         
         if args.antimodel:
             loss = train_one_tpfp_epoch(tp_dataloader=dataloader, fp_dataloader=fp_dataloader, model=model, device=device, optimizer=optimizer, current_epoch=epoch, criterion=criterion, EMA=ema)
-            get_cv_tpfp_loss(cv_dataloader, model, epoch, criterion=criterion)
+            # get_cv_tpfp_loss(cv_dataloader, model, epoch, criterion=criterion)
         else:
             loss = train_one_epoch(dataloader=dataloader, model=model, device=device, optimizer=optimizer, current_epoch=epoch, criterion=criterion, EMA=ema)
-            get_cv_loss(cv_dataloader, model, epoch, criterion=criterion)
+            # get_cv_loss(cv_dataloader, model, epoch, criterion=criterion)
         
         if args.ema:
                 ema.apply_shadow()

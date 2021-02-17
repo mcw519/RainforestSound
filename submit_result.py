@@ -14,7 +14,7 @@ from others import MVG
 from tqdm import tqdm
 
 class RFCXDatasetEval(RFCXDataset):
-    def __init__(self, eval_folder, feat_type="spectrogram", chunk_size=1000, overlap_ratio=5):
+    def __init__(self, eval_folder, feat_type="spectrogram", chunk_size=1000, overlap_ratio=0.5):
         self.eval_folder = eval_folder
         self.file_list = self.read_folder()
         self.feat_type = feat_type # spectrogram / mfcc / fbank
@@ -56,7 +56,7 @@ class RFCXDatasetEval(RFCXDataset):
             
                 else:
                     feats = self.KaldiSpectrogram(cut_wav)
-
+                
                 """Doing  add-delta first, then resize and normailze to 0-1 for resnet"""
                 if self.use_resnet:
                     feats = self.AddDeltaFeatStack(feats)
@@ -134,35 +134,16 @@ def SubmitRFCS(args):
     if args.ensemble:
         model_list = []
         for ckpt in args.ckpt_path, args.ensembleB, args.ensembleC, args.ensembleD, args.ensembleE:
-            if args.model_type == "ResNeSt50":
-                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-            elif args.model_type == "EfficientNetB0":
-                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-            elif args.model_type == "EfficientNetB1":
-                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-            elif args.model_type == "EfficientNetB2":
-                model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-            else:
-                raise NameError
-            
+            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
             load_ckpt(ckpt, model)
             model.to(device)
             model_list.append(model)
         
         model = EnsembleModel(model_list[0], model_list[1], model_list[2], model_list[3], model_list[4])
+        
 
     else:
-        if args.model_type == "ResNeSt50":
-            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-        elif args.model_type == "EfficientNetB0":
-            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-        elif args.model_type == "EfficientNetB1":
-            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-        elif args.model_type == "EfficientNetB2":
-            model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
-        else:
-            raise NameError
-
+        model = RFCXmodel(outdim, backbone=args.model_type, activation=args.activation)
         load_ckpt(args.ckpt_path, model)
     
     model.to(device)
@@ -175,7 +156,7 @@ def SubmitRFCS(args):
     submit_dct = {}
     submit_avg_dct = {}
 
-    for _, batch in tqdm(enumerate(dataloader)):
+    for _, batch in enumerate(tqdm(dataloader)):
         uttid_list, feats, feat_len_list = batch
 
         feats = feats.to(device)
@@ -193,10 +174,6 @@ def SubmitRFCS(args):
             
             result = output[first:first + feat_len, :] #.split(1, 0)
             
-            # chunk_class_prob = torch.log_softmax(result, dim=-1)[:, :24] # sigmoid is better than this
-            # segment_prob = torch.log_softmax(result, dim=0)[:, :24] # sigmoid is better than this
-            # result = chunk_class_prob * segment_prob
-
             result = torch.sigmoid(result[:, :24])
 
             if args.mvg:
@@ -213,7 +190,6 @@ def SubmitRFCS(args):
             submit_dct[uttid] = [ str(i) for i in pred_id.tolist() ]
             submit_avg_dct[uttid] = [ str(i) for i in pred_id_avg.tolist() ]
 
-        print("processing {}/{} files".format(len(submit_dct.keys()), total_file))
                 
     with open("RFCX_MAX_submit.csv", "w") as f:
         f.writelines("recording_id,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12,s13,s14,s15,s16,s17,s18,s19,s20,s21,s22,s23" + "\n")

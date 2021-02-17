@@ -32,8 +32,6 @@ class DumpFeature():
                 dct[idx] = [uttid_list[uid], feat_list[uid], target_list[uid]]
                 idx += 1
             
-            # print("Finished {}/{} data".format(idx, len(dataset)*num_aug))
-
         torch.save(dct, os.path.join(self.out_dir, "train_tp.feats"))
         del dataset, train_tp_pd, dct
     
@@ -48,9 +46,7 @@ class DumpFeature():
             for uid in range(len(uttid_list)):
                 dct[idx] = [uttid_list[uid], feat_list[uid], target_list[uid]]
                 idx += 1
-            
-            # print("Finished {}/{} data".format(idx, len(dataset)*num_aug))
-        
+                   
         torch.save(dct, os.path.join(self.out_dir, "train_fp.feats"))
         del dataset, train_fp_pd, dct
     

@@ -119,7 +119,7 @@ class RFCXmodel(nn.Module):
         if self.is_training:
             x = self.specaug(x)
 
-        if self.backbone == "ResNeSt50":
+        if self.backbone == "ResNeSt50" or self.backbone == "ResNeSt101":
             feature = self.feature(x)
         
         else:

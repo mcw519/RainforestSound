@@ -25,6 +25,7 @@ class RFCXDataset(torch.utils.data.Dataset):
         self.except_length = chunk_size * self.feat_config["frame_shift"] / 1000 # frame_shift is ms
         self.use_resnet = True
         self.audio_aug = audio_aug
+        self.random_crop = False
 
     def __len__(self):
         return len(self.manifest_pd)
@@ -36,7 +37,7 @@ class RFCXDataset(torch.utils.data.Dataset):
         kaldi_feats_config.setdefault("channel", 0) # mono
         kaldi_feats_config.setdefault("sample_frequency", 48000 )
         kaldi_feats_config.setdefault("dither", 0.0)
-        kaldi_feats_config.setdefault("frame_length", 25.0)
+        kaldi_feats_config.setdefault("frame_length", 15.0)
         kaldi_feats_config.setdefault("frame_shift", 10.0)
         kaldi_feats_config.setdefault("preemphasis_coefficient", 0.97)
         kaldi_feats_config.setdefault("snip_edges", False)
@@ -87,6 +88,38 @@ class RFCXDataset(torch.utils.data.Dataset):
             t_end = int(t_max*sr + 2*padding - t_min*sr)
         else:
             t_end = int(t_max*sr + padding)
+        
+        if t_end > int(60 * sr):
+            t_start = int(60 *sr - self.chunk_size * 0.01 * sr)
+            cut_wav = wav[0][t_start:]
+        else:
+            cut_wav = wav[0][t_start:t_end]
+
+        cut_wav = cut_wav.view(1, -1)
+
+        return cut_wav
+    
+    def cut_wav_rand(self, wav: torch.Tensor, sr: int, t_min: float, t_max: float):
+        """
+            Wav is a Tensor with shape [1, xxx], cutting method worked on samples.
+            Return:
+                Tensor with shape [1, xxx]
+        """
+        t_center = int(((t_min + t_max) / 2) * sr)
+        shiffting = random.uniform(-3, 3)
+        shiffting = int(shiffting * sr)
+        
+        if t_center + shiffting <= int(60 * sr):
+            t_center += shiffting
+        
+        padding = int(self.except_length * sr)
+        t_start = max(0, t_center - padding)
+
+        if t_start == 0:
+            t_end = 2 * padding
+        
+        else:
+            t_end = t_center + padding
         
         if t_end > int(60 * sr):
             t_start = int(60 *sr - self.chunk_size * 0.01 * sr)
@@ -179,35 +212,55 @@ class RFCXDataset(torch.utils.data.Dataset):
 
         audio_list = []
         # general audio
-        if (t_max - t_min) > self.except_length:
-            cut_audio = self.cut_wav(wav, sr, t_min, t_max)
+        if self.random_crop:
+            cut_audio = self.cut_wav_rand(wav, sr, t_min, t_max)
+
         else:
-            padded_s = self.except_length - (t_max - t_min)
-            padded_sample = padded_s * sr / 2
-            cut_audio = self.cut_wav(wav, sr, t_min, t_max, padding=padded_sample)
+            if (t_max - t_min) > self.except_length:
+                cut_audio = self.cut_wav(wav, sr, t_min, t_max)
+            else:
+                padded_s = self.except_length - (t_max - t_min)
+                padded_sample = padded_s * sr / 2
+                cut_audio = self.cut_wav(wav, sr, t_min, t_max, padding=padded_sample)
         
         audio_list.append(cut_audio)
 
         """Augment audio"""
-        if self.audio_aug:
-            aug_wav, aug_speed = self.audio_augment(wav=wav)
-            t_max = t_max / aug_speed
-            t_min = t_min / aug_speed
-            if (t_max - t_min) > self.except_length:
-                aug_cut_audio = self.cut_wav(aug_wav, sr, t_min, t_max)
-                aug_noise_cut_audio = self.cut_wav(aug_noise_wav, sr, t_min, t_max)
-            else:
-                padded_s = self.except_length - (t_max - t_min)
-                padded_sample = padded_s * sr / 2
-                aug_cut_audio = self.cut_wav(aug_wav, sr, t_min, t_max, padding=padded_sample)
-                aug_noise_cut_audio = self.cut_wav(aug_noise_wav, sr, t_min, t_max, padding=padded_sample)
+        if self.random_crop:
+            if self.audio_aug:
+                aug_wav, aug_speed = self.audio_augment(wav=wav)
+                t_max = t_max / aug_speed
+                t_min = t_min / aug_speed
+                aug_cut_audio = self.cut_wav_rand(aug_wav, sr, t_min, t_max)
+                aug_noise_cut_audio = self.cut_wav_rand(aug_noise_wav, sr, t_min, t_max)
+                
+                audio_list.append(aug_cut_audio)
+                audio_list.append(aug_noise_cut_audio)
+                target_list.append(target)
+                target_list.append(target)
+                uttid_list.append(recording_id+"_aug")
+                uttid_list.append(recording_id+"_aug_noise")
+    
+        else:
+            if self.audio_aug:
+                aug_wav, aug_speed = self.audio_augment(wav=wav)
+                t_max = t_max / aug_speed
+                t_min = t_min / aug_speed
+                if (t_max - t_min) > self.except_length:
+                    aug_cut_audio = self.cut_wav(aug_wav, sr, t_min, t_max)
+                    aug_noise_cut_audio = self.cut_wav(aug_noise_wav, sr, t_min, t_max)
+                else:
+                    padded_s = self.except_length - (t_max - t_min)
+                    padded_sample = padded_s * sr / 2
+                    aug_cut_audio = self.cut_wav(aug_wav, sr, t_min, t_max, padding=padded_sample)
+                    aug_noise_cut_audio = self.cut_wav(aug_noise_wav, sr, t_min, t_max, padding=padded_sample)
             
-            audio_list.append(aug_cut_audio)
-            audio_list.append(aug_noise_cut_audio)
-            target_list.append(target)
-            target_list.append(target)
-            uttid_list.append(recording_id+"_aug")
-            uttid_list.append(recording_id+"_aug_noise")
+                audio_list.append(aug_cut_audio)
+                audio_list.append(aug_noise_cut_audio)
+                target_list.append(target)
+                target_list.append(target)
+                uttid_list.append(recording_id+"_aug")
+                uttid_list.append(recording_id+"_aug_noise")
         
         """Extract feature"""
         feats_list = []
